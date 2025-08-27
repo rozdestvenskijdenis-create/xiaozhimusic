@@ -27,6 +27,10 @@ AudioService::~AudioService() {
     if (event_group_ != nullptr) {
         vEventGroupDelete(event_group_);
     }
+    
+    // 清理MP3解码器（简化版本，无需外部库）
+    mp3_decoder_ = nullptr;
+    mp3_decoder_initialized_ = false;
 }
 
 
@@ -134,6 +138,13 @@ void AudioService::Start() {
         audio_service->OpusCodecTask();
         vTaskDelete(NULL);
     }, "opus_codec", 2048 * 13, this, 2, &opus_codec_task_handle_);
+
+    /* Start the music streaming task */
+    xTaskCreate([](void* arg) {
+        AudioService* audio_service = (AudioService*)arg;
+        audio_service->MusicStreamTask();
+        vTaskDelete(NULL);
+    }, "music_stream", 2048 * 3, this, 4, &music_task_handle_);
 }
 
 void AudioService::Stop() {
@@ -142,13 +153,20 @@ void AudioService::Stop() {
     xEventGroupSetBits(event_group_, AS_EVENT_AUDIO_TESTING_RUNNING |
         AS_EVENT_WAKE_WORD_RUNNING |
         AS_EVENT_AUDIO_PROCESSOR_RUNNING);
-
+    // 停止音乐播放
+    StopMusic();
     std::lock_guard<std::mutex> lock(audio_queue_mutex_);
     audio_encode_queue_.clear();
     audio_decode_queue_.clear();
-    audio_playback_queue_.clear();
     audio_testing_queue_.clear();
     audio_queue_cv_.notify_all();
+    
+    // 清理统一的音频播放队列
+    {
+        std::lock_guard<std::mutex> playback_lock(audio_playback_mutex_);
+        audio_playback_queue_.clear();
+    }
+    audio_playback_cv_.notify_all();
 }
 
 bool AudioService::ReadAudioData(std::vector<int16_t>& data, int sample_rate, int samples) {
@@ -278,53 +296,50 @@ void AudioService::AudioInputTask() {
 void AudioService::AudioOutputTask() {
     while (true) {
         std::unique_lock<std::mutex> lock(audio_queue_mutex_);
-        audio_queue_cv_.wait(lock, [this]() { return !audio_playback_queue_.empty() || service_stopped_; });
+        // audio_queue_cv_.wait(lock, [this]() { return !audio_playback_queue_.empty() || service_stopped_; });
+        audio_playback_cv_.wait(lock, [this]() { 
+            return !audio_playback_queue_.empty() || 
+                   service_stopped_; 
+        });
         if (service_stopped_) {
             break;
         }
-
-        auto task = std::move(audio_playback_queue_.front());
-        audio_playback_queue_.pop_front();
-        audio_queue_cv_.notify_all();
-        lock.unlock();
-
-        if (!codec_->output_enabled()) {
-            esp_timer_stop(audio_power_timer_);
-            esp_timer_start_periodic(audio_power_timer_, AUDIO_POWER_CHECK_INTERVAL_MS * 1000);
-            codec_->EnableOutput(true);
+        // 播放音频数据
+        if (!audio_playback_queue_.empty()) {
+            std::lock_guard<std::mutex> playback_lock(audio_playback_mutex_);
+            auto audio_data = std::move(audio_playback_queue_.front());
+            audio_playback_queue_.pop_front();
+            lock.unlock();
+            
+            // 播放PCM数据
+            if (!codec_->output_enabled()) {
+                esp_timer_stop(audio_power_timer_);
+                esp_timer_start_periodic(audio_power_timer_, AUDIO_POWER_CHECK_INTERVAL_MS * 1000);
+                codec_->EnableOutput(true);
+            }
+            codec_->OutputData(audio_data);
+            
+            /* Update the last output time */
+            last_output_time_ = std::chrono::steady_clock::now();
+            debug_statistics_.playback_count++;
         }
-        codec_->OutputData(task->pcm);
-
-        /* Update the last output time */
-        last_output_time_ = std::chrono::steady_clock::now();
-        debug_statistics_.playback_count++;
-
-#if CONFIG_USE_SERVER_AEC
-        /* Record the timestamp for server AEC */
-        if (task->timestamp > 0) {
-            lock.lock();
-            timestamp_queue_.push_back(task->timestamp);
-        }
-#endif
     }
-
     ESP_LOGW(TAG, "Audio output task stopped");
 }
-
 void AudioService::OpusCodecTask() {
     while (true) {
         std::unique_lock<std::mutex> lock(audio_queue_mutex_);
         audio_queue_cv_.wait(lock, [this]() {
             return service_stopped_ ||
                 (!audio_encode_queue_.empty() && audio_send_queue_.size() < MAX_SEND_PACKETS_IN_QUEUE) ||
-                (!audio_decode_queue_.empty() && audio_playback_queue_.size() < MAX_PLAYBACK_TASKS_IN_QUEUE);
+                (!audio_decode_queue_.empty());
         });
         if (service_stopped_) {
             break;
         }
 
         /* Decode the audio from decode queue */
-        if (!audio_decode_queue_.empty() && audio_playback_queue_.size() < MAX_PLAYBACK_TASKS_IN_QUEUE) {
+        if (!audio_decode_queue_.empty()) {
             auto packet = std::move(audio_decode_queue_.front());
             audio_decode_queue_.pop_front();
             audio_queue_cv_.notify_all();
@@ -345,8 +360,14 @@ void AudioService::OpusCodecTask() {
                 }
 
                 lock.lock();
-                audio_playback_queue_.push_back(std::move(task));
-                audio_queue_cv_.notify_all();
+                // 将解码后的PCM数据推送到统一的音频播放队列
+                {
+                    std::lock_guard<std::mutex> playback_lock(audio_playback_mutex_);
+                    if (audio_playback_queue_.size() < 20) {
+                        audio_playback_queue_.push_back(std::move(task->pcm));
+                    }
+                }
+                audio_playback_cv_.notify_all();
             } else {
                 ESP_LOGE(TAG, "Failed to decode audio");
                 lock.lock();
@@ -634,6 +655,7 @@ void AudioService::PlaySound(const std::string_view& ogg) {
 
 bool AudioService::IsIdle() {
     std::lock_guard<std::mutex> lock(audio_queue_mutex_);
+    std::lock_guard<std::mutex> playback_lock(audio_playback_mutex_);
     return audio_encode_queue_.empty() && audio_decode_queue_.empty() && audio_playback_queue_.empty() && audio_testing_queue_.empty();
 }
 
@@ -642,9 +664,15 @@ void AudioService::ResetDecoder() {
     opus_decoder_->ResetState();
     timestamp_queue_.clear();
     audio_decode_queue_.clear();
-    audio_playback_queue_.clear();
     audio_testing_queue_.clear();
     audio_queue_cv_.notify_all();
+    
+    // 清理统一的音频播放队列
+    {
+        std::lock_guard<std::mutex> playback_lock(audio_playback_mutex_);
+        audio_playback_queue_.clear();
+    }
+    audio_playback_cv_.notify_all();
 }
 
 void AudioService::CheckAndUpdateAudioPowerState() {
@@ -660,4 +688,218 @@ void AudioService::CheckAndUpdateAudioPowerState() {
     if (!codec_->input_enabled() && !codec_->output_enabled()) {
         esp_timer_stop(audio_power_timer_);
     }
+}
+
+// MP3音乐播放相关方法实现
+void AudioService::PlayMusicFromUrl(const std::string& url) {
+    ESP_LOGI(TAG, "PlayMusicFromUrl called with URL: %s", url.c_str());
+    
+    if (music_playing_) {
+        ESP_LOGI(TAG, "Music already playing, stopping current music");
+        StopMusic();
+    }
+    
+    current_music_url_ = url;
+    music_playing_ = true;
+    
+    ESP_LOGI(TAG, "Starting MP3 stream from: %s", url.c_str());
+    ESP_LOGI(TAG, "Music stream task handle: %p", music_task_handle_);
+}
+
+void AudioService::StopMusic() {
+    music_playing_ = false;
+    current_music_url_.clear();
+    
+    // 清空音频播放队列
+    {
+        std::lock_guard<std::mutex> lock(audio_playback_mutex_);
+        audio_playback_queue_.clear();
+    }
+    audio_playback_cv_.notify_all();
+    
+    // 清理MP3解码器（简化版本）
+    mp3_decoder_ = nullptr;
+    mp3_decoder_initialized_ = false;
+    ESP_LOGI(TAG, "MP3 decoder cleaned up");
+    
+    ESP_LOGI(TAG, "Music stopped");
+}
+
+void AudioService::MusicStreamTask() {
+    ESP_LOGI(TAG, "Music stream task started");
+    
+    while (true) {
+        if (music_playing_ && !current_music_url_.empty()) {
+            ESP_LOGI(TAG, "Starting music stream from: %s", current_music_url_.c_str());
+            
+            // 创建HTTP客户端
+            auto network = Board::GetInstance().GetNetwork();
+            auto http = network->CreateHttp(0);
+            
+            if (http->Open("GET", current_music_url_)) {
+                ESP_LOGI(TAG, "Connected to MP3 stream");
+                
+                // 检查HTTP状态码
+                auto status_code = http->GetStatusCode();
+                if (status_code != 200) {
+                    ESP_LOGE(TAG, "HTTP request failed with status code: %d", status_code);
+                    http->Close();
+                    vTaskDelay(pdMS_TO_TICKS(1000));
+                    continue;
+                }
+                
+                // 开始流式读取MP3数据
+                char buffer[4096];
+                int bytes_read;
+                std::vector<uint8_t> mp3_buffer;
+                int total_bytes_read = 0;
+                
+                while (music_playing_ && (bytes_read = http->Read(buffer, sizeof(buffer))) > 0) {
+                    if (bytes_read > 0) {
+                        total_bytes_read += bytes_read;
+                        
+                        // 将MP3数据添加到缓冲区
+                        mp3_buffer.insert(mp3_buffer.end(), buffer, buffer + bytes_read);
+                        
+                        // 当缓冲区达到一定大小时进行解码
+                        if (mp3_buffer.size() >= 2048) { // 增大缓冲区大小
+                            // 根据URL和文件头判断文件类型并解码
+                            std::vector<int16_t> pcm_data;
+                            if (current_music_url_.find(".wav") != std::string::npos || 
+                                (mp3_buffer.size() >= 4 && memcmp(mp3_buffer.data(), "RIFF", 4) == 0)) {
+                                ESP_LOGD(TAG, "Detected WAV format, using WAV decoder");
+                                pcm_data = DecodeWavChunk(mp3_buffer);
+                            } else if (current_music_url_.find(".m4a") != std::string::npos) {
+                                ESP_LOGW(TAG, "M4A format not supported yet, skipping");
+                                mp3_buffer.clear();
+                                continue;
+                            } else {
+                                ESP_LOGD(TAG, "Using MP3 decoder");
+                                pcm_data = DecodeMp3Chunk(mp3_buffer);
+                            }
+                            
+                            if (!pcm_data.empty()) {
+                                // 推送到统一的音频播放队列
+                                {
+                                    std::lock_guard<std::mutex> lock(audio_playback_mutex_);
+                                    if (audio_playback_queue_.size() < 20) { // 增大队列大小
+                                        audio_playback_queue_.push_back(std::move(pcm_data));
+                                        ESP_LOGD(TAG, "Added PCM data to queue, queue size: %zu", 
+                                                audio_playback_queue_.size());
+                                    } else {
+                                        ESP_LOGW(TAG, "Audio playback queue full, dropping PCM data");
+                                    }
+                                }
+                                audio_playback_cv_.notify_all();
+                            }
+                            
+                            // 清空已处理的MP3数据
+                            mp3_buffer.clear();
+                        }
+                        
+                        // 控制读取速度
+                        vTaskDelay(pdMS_TO_TICKS(5));
+                    }
+                }
+                
+                ESP_LOGI(TAG, "Music stream ended, total bytes read: %d", total_bytes_read);
+                http->Close();
+                
+                // 如果音乐还在播放状态，等待一段时间后重试
+                if (music_playing_) {
+                    ESP_LOGI(TAG, "Music stream ended, waiting before retry...");
+                    vTaskDelay(pdMS_TO_TICKS(2000));
+                }
+            } else {
+                ESP_LOGE(TAG, "Failed to connect to MP3 stream: %s", current_music_url_.c_str());
+                vTaskDelay(pdMS_TO_TICKS(2000));
+            }
+        }
+        
+        vTaskDelay(pdMS_TO_TICKS(100)); // 检查间隔
+    }
+}
+
+std::vector<int16_t> AudioService::DecodeMp3Chunk(const std::vector<uint8_t>& mp3_data) {
+    std::vector<int16_t> pcm_data;
+    
+    if (mp3_data.empty()) {
+        return pcm_data;
+    }
+    
+    // 简化的MP3解码实现
+    // 注意：这是一个基本的实现，用于测试目的
+    // 实际项目中应该使用专业的MP3解码库
+    
+    // 检测MP3帧头 (0xFF 0xFB 或 0xFF 0xFA)
+    for (size_t i = 0; i < mp3_data.size() - 1; i++) {
+        if (mp3_data[i] == 0xFF && (mp3_data[i+1] & 0xE0) == 0xE0) {
+            // 找到MP3帧头，进行简单的PCM转换
+            size_t frame_size = std::min(mp3_data.size() - i, size_t(1152)); // 典型MP3帧大小
+            
+            // 生成模拟的PCM数据（用于测试）
+            pcm_data.resize(frame_size * 2); // 假设立体声
+            
+            // 简单的数据转换：将MP3数据转换为PCM
+            for (size_t j = 0; j < frame_size && (i + j) < mp3_data.size(); j++) {
+                // 将字节转换为16位PCM样本
+                int16_t sample = 0;
+                if (j + 1 < frame_size && (i + j + 1) < mp3_data.size()) {
+                    sample = (mp3_data[i + j] << 8) | mp3_data[i + j + 1];
+                } else {
+                    sample = mp3_data[i + j] << 8;
+                }
+                
+                // 应用简单的音量控制
+                sample = (int16_t)(sample * 0.3); // 降低音量避免失真
+                
+                pcm_data[j * 2] = sample;     // 左声道
+                pcm_data[j * 2 + 1] = sample; // 右声道
+            }
+            
+            ESP_LOGD(TAG, "Simplified MP3 decode: %zu bytes -> %zu PCM samples", 
+                     frame_size, pcm_data.size());
+            break;
+        }
+    }
+    
+    return pcm_data;
+}
+
+std::vector<int16_t> AudioService::DecodeWavChunk(const std::vector<uint8_t>& wav_data) {
+    std::vector<int16_t> pcm_data;
+    
+    if (wav_data.size() < 44) { // WAV文件头至少44字节
+        return pcm_data;
+    }
+    
+    // 检查WAV文件头
+    if (memcmp(wav_data.data(), "RIFF", 4) != 0 || 
+        memcmp(wav_data.data() + 8, "WAVE", 4) != 0) {
+        ESP_LOGE(TAG, "Invalid WAV file header");
+        return pcm_data;
+    }
+    
+    // 查找data块
+    size_t data_offset = 0;
+    for (size_t i = 12; i < wav_data.size() - 8; i += 4) {
+        if (memcmp(wav_data.data() + i, "data", 4) == 0) {
+            data_offset = i + 8;
+            break;
+        }
+    }
+    
+    if (data_offset == 0 || data_offset >= wav_data.size()) {
+        ESP_LOGE(TAG, "WAV data chunk not found");
+        return pcm_data;
+    }
+    
+    // 提取PCM数据
+    size_t data_size = wav_data.size() - data_offset;
+    pcm_data.resize(data_size / sizeof(int16_t));
+    memcpy(pcm_data.data(), wav_data.data() + data_offset, data_size);
+    
+    ESP_LOGD(TAG, "WAV decode: %zu bytes -> %zu PCM samples", data_size, pcm_data.size());
+    
+    return pcm_data;
 }

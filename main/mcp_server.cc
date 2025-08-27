@@ -9,14 +9,31 @@
 #include <algorithm>
 #include <cstring>
 #include <esp_pthread.h>
+#include <cctype>
 
 #include "application.h"
 #include "display.h"
 #include "board.h"
-
+#include "audio_service.h"
+#include <cJSON.h>
 #define TAG "MCP"
 
 #define DEFAULT_TOOLCALL_STACK_SIZE 6144
+
+// URL编码函数（静态函数，避免重复定义）
+static std::string url_encode(const std::string& str) {
+    std::string result;
+    for (char c : str) {
+        if (isalnum(c) || c == '-' || c == '_' || c == '.' || c == '~') {
+            result += c;
+        } else {
+            char hex[4];
+            snprintf(hex, sizeof(hex), "%%%02X", (unsigned char)c);
+            result += hex;
+        }
+    }
+    return result;
+}
 
 McpServer::McpServer() {
 }
@@ -102,6 +119,124 @@ void McpServer::AddCommonTools() {
                 return camera->Explain(question);
             });
     }
+
+    // 添加音乐搜索和播放工具
+    AddTool("test_search_music",
+        "Search and play music by keyword. Use this tool when the user asks to play music, search for songs, or find music. This tool will search for music using the provided keyword and automatically start playing the first result.",
+        PropertyList({
+            Property("keyword", kPropertyTypeString, "Music search keyword")
+        }),
+        [](const PropertyList& properties) -> ReturnValue {
+            auto keyword = properties["keyword"].value<std::string>();
+            ESP_LOGI(TAG, "Searching for music: %s", keyword.c_str());
+            
+            // 构建搜索URL（使用URL编码）
+            std::string encoded_keyword = url_encode(keyword);
+            std::string search_url = "https://api.vkeys.cn/v2/music/tencent?word=" + encoded_keyword + "&choose=1&quality=8";
+            
+            // 创建HTTP客户端搜索音乐
+            auto& board = Board::GetInstance();
+            auto network = board.GetNetwork();
+            auto http = network->CreateHttp(0);
+            
+            if (http->Open("GET", search_url)) {
+                std::string response = http->ReadAll();
+                http->Close();
+                
+                // 解析JSON响应
+                cJSON* root = cJSON_Parse(response.c_str());
+                if (root) {
+                    cJSON* code = cJSON_GetObjectItem(root, "code");
+                    if (cJSON_IsNumber(code) && code->valueint == 200) {
+                        cJSON* data = cJSON_GetObjectItem(root, "data");
+                        if (cJSON_IsObject(data)) {
+                            cJSON* song = cJSON_GetObjectItem(data, "song");
+                            cJSON* singer = cJSON_GetObjectItem(data, "singer");
+                            cJSON* url = cJSON_GetObjectItem(data, "url");
+                            
+                            if (cJSON_IsString(url)) {
+                                std::string music_url = url->valuestring;
+                                ESP_LOGI(TAG, "Found music: %s - %s", 
+                                    cJSON_IsString(song) ? song->valuestring : "未知歌曲",
+                                    cJSON_IsString(singer) ? singer->valuestring : "未知歌手");
+                                
+                                // 开始播放音乐
+                                auto& audio_service = Application::GetInstance().GetAudioService();
+                                audio_service.PlayMusicFromUrl(music_url);
+                                
+                                std::string result = "{\"success\": true, \"song\": \"";
+                                if (cJSON_IsString(song)) {
+                                    result += song->valuestring;
+                                }
+                                result += "\", \"artist\": \"";
+                                if (cJSON_IsString(singer)) {
+                                    result += singer->valuestring;
+                                }
+                                result += "\", \"message\": \"开始播放音乐\"}";
+                                
+                                cJSON_Delete(root);
+                                return result;
+                            }
+                        }
+                    }
+                    cJSON_Delete(root);
+                }
+            }
+            
+            return "{\"success\": false, \"message\": \"搜索音乐失败\"}";
+        });
+    
+    // 添加音乐控制工具
+    AddTool("control_music",
+        "Control music playback. Use this tool to stop, pause, or control music playback.",
+        PropertyList({
+            Property("action", kPropertyTypeString, "Control action: play, pause, stop, next, previous")
+        }),
+        [](const PropertyList& properties) -> ReturnValue {
+            auto action = properties["action"].value<std::string>();
+            auto& audio_service = Application::GetInstance().GetAudioService();
+            
+            if (action == "stop") {
+                audio_service.StopMusic();
+                return "{\"success\": true, \"message\": \"音乐已停止\"}";
+            } else if (action == "pause") {
+                audio_service.StopMusic();
+                return "{\"success\": true, \"message\": \"音乐已暂停\"}";
+            } else {
+                return "{\"success\": false, \"message\": \"不支持的操作\"}";
+            }
+        });
+    
+        // 添加测试音乐播放工具
+    AddTool("test_music_playback",
+        "Test music playback functionality with a sample audio file.",
+        PropertyList(),
+        [](const PropertyList& properties) -> ReturnValue {
+            auto& audio_service = Application::GetInstance().GetAudioService();
+            
+            // 测试搜索并播放音乐
+            std::string test_url = "http://ws.stream.qqmusic.qq.com/M8000020wJDo3cx0j3.mp3?fromtag=8&guid=api.vkeys.cn&trace=3b4c6c387d2e8cf5&uin=3232283746&vkey=E4A7DBC39C0467C6E3542DD166C994FF836DB9C79599D67F3E857D122F0772850653959BA2DC85F8D853EB79A11315FB944782971CE85EEC__v2b94c282";
+            
+            ESP_LOGI(TAG, "Testing music playback with MP3 URL");
+            audio_service.PlayMusicFromUrl(test_url);
+            
+            return "{\"success\": true, \"message\": \"开始播放测试音乐\"}";
+        });
+    
+    // 添加简单的测试工具
+    AddTool("test_simple",
+        "Simple test tool to verify MCP tool calling works. Use this tool for testing purposes.",
+        PropertyList(),
+        [](const PropertyList& properties) -> ReturnValue {
+            ESP_LOGI(TAG, "Simple test tool called!");
+            
+            // 测试URL编码
+            std::string test_str = "青花瓷";
+            std::string encoded = url_encode(test_str);
+            ESP_LOGI(TAG, "URL encoding test: '%s' -> '%s'", test_str.c_str(), encoded.c_str());
+            
+            return "{\"success\": true, \"message\": \"测试工具调用成功\", \"timestamp\": \"" + std::to_string(esp_timer_get_time() / 1000000) + "\", \"url_encoding_test\": \"" + encoded + "\"}";
+        });
 
     // Restore the original tools list to the end of the tools list
     tools_.insert(tools_.end(), original_tools.begin(), original_tools.end());

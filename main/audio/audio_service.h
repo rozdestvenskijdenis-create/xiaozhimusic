@@ -106,7 +106,9 @@ public:
     void PlaySound(const std::string_view& sound);
     bool ReadAudioData(std::vector<int16_t>& data, int sample_rate, int samples);
     void ResetDecoder();
-
+    void PlayMusicFromUrl(const std::string& url);
+    void StopMusic();
+    bool IsMusicPlaying() const { return music_playing_; }
 private:
     AudioCodec* codec_ = nullptr;
     AudioServiceCallbacks callbacks_;
@@ -132,15 +134,26 @@ private:
     std::deque<std::unique_ptr<AudioStreamPacket>> audio_send_queue_;
     std::deque<std::unique_ptr<AudioStreamPacket>> audio_testing_queue_;
     std::deque<std::unique_ptr<AudioTask>> audio_encode_queue_;
-    std::deque<std::unique_ptr<AudioTask>> audio_playback_queue_;
+    // 统一的音频播放队列（用于所有音频播放）
+    std::deque<std::vector<int16_t>> audio_playback_queue_;
+    std::mutex audio_playback_mutex_;
+    std::condition_variable audio_playback_cv_;
     // For server AEC
     std::deque<uint32_t> timestamp_queue_;
+    // 音乐播放相关
+    std::string current_music_url_;
+    TaskHandle_t music_task_handle_ = nullptr;
+    
+    // MP3解码器
+    void* mp3_decoder_ = nullptr;
+    bool mp3_decoder_initialized_ = false;
 
     bool wake_word_initialized_ = false;
     bool audio_processor_initialized_ = false;
     bool voice_detected_ = false;
     bool service_stopped_ = true;
     bool audio_input_need_warmup_ = false;
+    bool music_playing_ = false;
 
     esp_timer_handle_t audio_power_timer_ = nullptr;
     std::chrono::steady_clock::time_point last_input_time_;
@@ -152,6 +165,11 @@ private:
     void PushTaskToEncodeQueue(AudioTaskType type, std::vector<int16_t>&& pcm);
     void SetDecodeSampleRate(int sample_rate, int frame_duration);
     void CheckAndUpdateAudioPowerState();
+
+    // MP3音乐流任务
+    void MusicStreamTask();
+    std::vector<int16_t> DecodeMp3Chunk(const std::vector<uint8_t>& mp3_data);
+    std::vector<int16_t> DecodeWavChunk(const std::vector<uint8_t>& wav_data);
 };
 
 #endif

@@ -73,3 +73,6 @@ CONFIG_LV_USE_WIN=n
 
 CONFIG_LV_BUILD_EXAMPLES=n
 
+# MP3 Decoder Configuration (Simplified implementation)
+# CONFIG_ESP_MP3_DECODER is not set
+
