@@ -132,7 +132,7 @@ void McpServer::AddCommonTools() {
             
             // 构建搜索URL（使用URL编码）
             std::string encoded_keyword = url_encode(keyword);
-            std::string search_url = "https://api.vkeys.cn/v2/music/tencent?word=" + encoded_keyword + "&choose=1&quality=8";
+            std::string search_url = "https://api.vkeys.cn/v2/music/tencent?word=" + encoded_keyword + "&choose=1&quality=6";
             
             // 创建HTTP客户端搜索音乐
             auto& board = Board::GetInstance();
@@ -215,7 +215,7 @@ void McpServer::AddCommonTools() {
             auto& audio_service = Application::GetInstance().GetAudioService();
             
             // 测试搜索并播放音乐
-            std::string test_url = "http://ws.stream.qqmusic.qq.com/M8000020wJDo3cx0j3.mp3?fromtag=8&guid=api.vkeys.cn&trace=3b4c6c387d2e8cf5&uin=3232283746&vkey=E4A7DBC39C0467C6E3542DD166C994FF836DB9C79599D67F3E857D122F0772850653959BA2DC85F8D853EB79A11315FB944782971CE85EEC__v2b94c282";
+            std::string test_url = "http://ws.stream.qqmusic.qq.com/M50000494nUd0tjbV6.mp3?fromtag=4&guid=api.vkeys.cn&trace=01fdfb5406f25305&uin=3232283746&vkey=BA968B4BDF754BF7339F0677B9AF4C569B9FCEB1B3F252E242441519736E5DB0D2A29A420272C06CC78C6E8C315B99F86413C7807A7A20C1__v2b94c3b0";
             
             ESP_LOGI(TAG, "Testing music playback with MP3 URL");
             audio_service.PlayMusicFromUrl(test_url);

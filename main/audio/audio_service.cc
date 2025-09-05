@@ -21,6 +21,9 @@
 
 AudioService::AudioService() {
     event_group_ = xEventGroupCreate();
+    
+    // 初始化ESP-ADF MP3播放器
+    esp_adf_mp3_player_ = std::make_unique<EspAdfMp3Player>();
 }
 
 AudioService::~AudioService() {
@@ -28,9 +31,17 @@ AudioService::~AudioService() {
         vEventGroupDelete(event_group_);
     }
     
-    // 清理MP3解码器（简化版本，无需外部库）
-    mp3_decoder_ = nullptr;
-    mp3_decoder_initialized_ = false;
+    // 清理MP3解码器
+    if (mp3_decoder_) {
+        mp3_decoder_->Deinitialize();
+        mp3_decoder_.reset();
+    }
+    
+    // 清理ESP-ADF MP3播放器
+    if (esp_adf_mp3_player_) {
+        esp_adf_mp3_player_->Deinitialize();
+        esp_adf_mp3_player_.reset();
+    }
 }
 
 
@@ -94,6 +105,19 @@ void AudioService::Initialize(AudioCodec* codec) {
         .skip_unhandled_events = true,
     };
     esp_timer_create(&audio_power_timer_args, &audio_power_timer_);
+    
+    // 初始化ESP-ADF MP3播放器
+    if (esp_adf_mp3_player_) {
+        ESP_LOGI(TAG, "Attempting to initialize ESP-ADF MP3 player with sample_rate=%d, channels=%d", 
+                 codec_->output_sample_rate(), codec_->output_channels());
+        if (esp_adf_mp3_player_->Initialize(codec_->output_sample_rate(), codec_->output_channels())) {
+            ESP_LOGI(TAG, "ESP-ADF MP3 player initialized successfully");
+        } else {
+            ESP_LOGE(TAG, "Failed to initialize ESP-ADF MP3 player");
+        }
+    } else {
+        ESP_LOGE(TAG, "ESP-ADF MP3 player is null");
+    }
 }
 
 void AudioService::Start() {
@@ -699,16 +723,32 @@ void AudioService::PlayMusicFromUrl(const std::string& url) {
         StopMusic();
     }
     
-    current_music_url_ = url;
-    music_playing_ = true;
-    
-    ESP_LOGI(TAG, "Starting MP3 stream from: %s", url.c_str());
-    ESP_LOGI(TAG, "Music stream task handle: %p", music_task_handle_);
+    // 使用ESP-ADF MP3播放器播放
+    if (esp_adf_mp3_player_ && esp_adf_mp3_player_->IsInitialized()) {
+        if (esp_adf_mp3_player_->PlayUrl(url)) {
+            current_music_url_ = url;
+            music_playing_ = true;
+            ESP_LOGI(TAG, "Started ESP-ADF MP3 playback from: %s", url.c_str());
+        } else {
+            ESP_LOGE(TAG, "Failed to start ESP-ADF MP3 playback");
+        }
+    } else {
+        ESP_LOGW(TAG, "ESP-ADF MP3 player not available, falling back to custom implementation");
+        current_music_url_ = url;
+        music_playing_ = true;
+        ESP_LOGI(TAG, "Starting custom MP3 stream from: %s", url.c_str());
+    }
 }
 
 void AudioService::StopMusic() {
     music_playing_ = false;
     current_music_url_.clear();
+    
+    // 停止ESP-ADF MP3播放器
+    if (esp_adf_mp3_player_ && esp_adf_mp3_player_->IsInitialized()) {
+        esp_adf_mp3_player_->Stop();
+        ESP_LOGI(TAG, "ESP-ADF MP3 player stopped");
+    }
     
     // 清空音频播放队列
     {
@@ -717,10 +757,12 @@ void AudioService::StopMusic() {
     }
     audio_playback_cv_.notify_all();
     
-    // 清理MP3解码器（简化版本）
-    mp3_decoder_ = nullptr;
-    mp3_decoder_initialized_ = false;
-    ESP_LOGI(TAG, "MP3 decoder cleaned up");
+    // 清理MP3解码器
+    if (mp3_decoder_) {
+        mp3_decoder_->Deinitialize();
+        mp3_decoder_.reset();
+        ESP_LOGI(TAG, "MP3 decoder cleaned up");
+    }
     
     ESP_LOGI(TAG, "Music stopped");
 }
@@ -782,13 +824,17 @@ void AudioService::MusicStreamTask() {
                                 // 推送到统一的音频播放队列
                                 {
                                     std::lock_guard<std::mutex> lock(audio_playback_mutex_);
-                                    if (audio_playback_queue_.size() < 20) { // 增大队列大小
-                                        audio_playback_queue_.push_back(std::move(pcm_data));
-                                        ESP_LOGD(TAG, "Added PCM data to queue, queue size: %zu", 
-                                                audio_playback_queue_.size());
-                                    } else {
-                                        ESP_LOGW(TAG, "Audio playback queue full, dropping PCM data");
+                                                                    if (audio_playback_queue_.size() < 30) { // 进一步增大队列大小
+                                    audio_playback_queue_.push_back(std::move(pcm_data));
+                                    ESP_LOGD(TAG, "Added PCM data to queue, queue size: %zu", 
+                                            audio_playback_queue_.size());
+                                } else {
+                                    // 减少日志频率，避免日志刷屏
+                                    static int drop_count = 0;
+                                    if (++drop_count % 10 == 1) {
+                                        ESP_LOGW(TAG, "Audio playback queue full, dropping PCM data (dropped %d times)", drop_count);
                                     }
+                                }
                                 }
                                 audio_playback_cv_.notify_all();
                             }
@@ -827,40 +873,23 @@ std::vector<int16_t> AudioService::DecodeMp3Chunk(const std::vector<uint8_t>& mp
         return pcm_data;
     }
     
-    // 简化的MP3解码实现
-    // 注意：这是一个基本的实现，用于测试目的
-    // 实际项目中应该使用专业的MP3解码库
-    
-    // 检测MP3帧头 (0xFF 0xFB 或 0xFF 0xFA)
-    for (size_t i = 0; i < mp3_data.size() - 1; i++) {
-        if (mp3_data[i] == 0xFF && (mp3_data[i+1] & 0xE0) == 0xE0) {
-            // 找到MP3帧头，进行简单的PCM转换
-            size_t frame_size = std::min(mp3_data.size() - i, size_t(1152)); // 典型MP3帧大小
-            
-            // 生成模拟的PCM数据（用于测试）
-            pcm_data.resize(frame_size * 2); // 假设立体声
-            
-            // 简单的数据转换：将MP3数据转换为PCM
-            for (size_t j = 0; j < frame_size && (i + j) < mp3_data.size(); j++) {
-                // 将字节转换为16位PCM样本
-                int16_t sample = 0;
-                if (j + 1 < frame_size && (i + j + 1) < mp3_data.size()) {
-                    sample = (mp3_data[i + j] << 8) | mp3_data[i + j + 1];
-                } else {
-                    sample = mp3_data[i + j] << 8;
-                }
-                
-                // 应用简单的音量控制
-                sample = (int16_t)(sample * 0.3); // 降低音量避免失真
-                
-                pcm_data[j * 2] = sample;     // 左声道
-                pcm_data[j * 2 + 1] = sample; // 右声道
-            }
-            
-            ESP_LOGD(TAG, "Simplified MP3 decode: %zu bytes -> %zu PCM samples", 
-                     frame_size, pcm_data.size());
-            break;
+    // 初始化MP3解码器（如果尚未初始化）
+    if (!mp3_decoder_) {
+        mp3_decoder_ = std::make_unique<Mp3Decoder>();
+        if (!mp3_decoder_->Initialize(codec_->output_sample_rate(), codec_->output_channels())) {
+            ESP_LOGE(TAG, "Failed to initialize MP3 decoder");
+            mp3_decoder_.reset();
+            return pcm_data;
         }
+        ESP_LOGI(TAG, "MP3 decoder initialized successfully");
+    }
+    
+    // 使用真正的MP3解码器解码数据
+    pcm_data = mp3_decoder_->DecodeChunk(mp3_data);
+    
+    if (!pcm_data.empty()) {
+        ESP_LOGD(TAG, "MP3 decode: %zu bytes -> %zu PCM samples", 
+                 mp3_data.size(), pcm_data.size());
     }
     
     return pcm_data;

@@ -9,6 +9,14 @@ set(PROJECT_VER "1.8.6")
 # Add this line to disable the specific warning
 add_compile_options(-Wno-missing-field-initializers)
 
+# Include ESP-ADF if available
+if(DEFINED ENV{ADF_PATH})
+    include($ENV{ADF_PATH}/CMakeLists.txt)
+    message(STATUS "ESP-ADF found at: $ENV{ADF_PATH}")
+else()
+    message(WARNING "ESP-ADF not found. Set ADF_PATH environment variable to use ESP-ADF features.")
+endif()
+
 include($ENV{IDF_PATH}/tools/cmake/project.cmake)
 project(xiaozhi)
 

@@ -21,6 +21,8 @@
 #include "processors/audio_debugger.h"
 #include "wake_word.h"
 #include "protocol.h"
+#include "mp3_decoder.h"
+#include "esp_adf_mp3_player.h"
 
 
 /*
@@ -145,8 +147,10 @@ private:
     TaskHandle_t music_task_handle_ = nullptr;
     
     // MP3解码器
-    void* mp3_decoder_ = nullptr;
-    bool mp3_decoder_initialized_ = false;
+    std::unique_ptr<Mp3Decoder> mp3_decoder_;
+    
+    // ESP-ADF MP3播放器
+    std::unique_ptr<EspAdfMp3Player> esp_adf_mp3_player_;
 
     bool wake_word_initialized_ = false;
     bool audio_processor_initialized_ = false;
