@@ -1,5 +1,6 @@
 #include "mp3_decoder.h"
 #include <esp_log.h>
+#include "opus_resampler.h"
 #include <cstring>
 
 // ESP-ADF includes
@@ -51,11 +52,9 @@ bool Mp3Decoder::Initialize(int sample_rate, int channels) {
         return false;
     }
     
-    // 创建MP3解码器
+    // 创建MP3解码器 - 让MP3解码器使用原始采样率，然后我们进行转换
     mp3_decoder_cfg_t mp3_cfg = DEFAULT_MP3_DECODER_CONFIG();
-    mp3_cfg.stack_in_ext = false;  // 禁用外部内存分配，避免FreeRTOS补丁问题
-    mp3_cfg.task_core = 1;         // 使用核心1，避免与主任务冲突
-    mp3_cfg.task_prio = 4;         // 降低任务优先级
+    // 不设置输出采样率，让MP3解码器使用原始采样率
     mp3_decoder_ = mp3_decoder_init(&mp3_cfg);
     if (mp3_decoder_ == nullptr) {
         ESP_LOGE(TAG, "Failed to initialize MP3 decoder");
@@ -65,15 +64,11 @@ bool Mp3Decoder::Initialize(int sample_rate, int channels) {
         return false;
     }
     
-    // 创建I2S流（用于输出PCM数据）
-    i2s_stream_cfg_t i2s_cfg = I2S_STREAM_CFG_DEFAULT();
-    i2s_cfg.type = AUDIO_STREAM_WRITER;
-    // 在ESP-IDF 5.x中，配置在std_cfg中
-    i2s_cfg.std_cfg.clk_cfg.sample_rate_hz = sample_rate_;
-    i2s_cfg.std_cfg.slot_cfg.slot_mode = (channels_ == 1) ? I2S_SLOT_MODE_MONO : I2S_SLOT_MODE_STEREO;
-    i2s_stream_ = i2s_stream_init(&i2s_cfg);
-    if (i2s_stream_ == nullptr) {
-        ESP_LOGE(TAG, "Failed to initialize I2S stream");
+    // 创建一个输出环形缓冲区来存储MP3解码后的PCM数据
+    // 使用默认大小，避免内存问题
+    output_ringbuf_ = rb_create(4096, 1);  // 4KB缓冲区，使用默认大小
+    if (!output_ringbuf_) {
+        ESP_LOGE(TAG, "Failed to create output ring buffer");
         audio_element_deinit(mp3_decoder_);
         audio_element_deinit(http_stream_);
         audio_pipeline_deinit(pipeline_);
@@ -81,16 +76,20 @@ bool Mp3Decoder::Initialize(int sample_rate, int channels) {
         return false;
     }
     
-    // 注册所有元素到管道
+    // 将输出缓冲区连接到MP3解码器
+    audio_element_set_output_ringbuf(mp3_decoder_, output_ringbuf_);
+    
+    i2s_stream_ = nullptr;
+    ESP_LOGI(TAG, "Created output buffer for MP3 decoder (no I2S stream)");
+    
+    // 注册元素到管道（不包含I2S流）
     audio_pipeline_register(pipeline_, http_stream_, "http");
     audio_pipeline_register(pipeline_, mp3_decoder_, "mp3");
-    audio_pipeline_register(pipeline_, i2s_stream_, "i2s");
     
-    // 链接管道元素：http -> mp3 -> i2s
-    const char *link_tag[3] = {"http", "mp3", "i2s"};
-    if (audio_pipeline_link(pipeline_, &link_tag[0], 3) != ESP_OK) {
+    // 链接管道元素：http -> mp3（不包含I2S）
+    const char *link_tag[2] = {"http", "mp3"};
+    if (audio_pipeline_link(pipeline_, &link_tag[0], 2) != ESP_OK) {
         ESP_LOGE(TAG, "Failed to link audio pipeline elements");
-        audio_element_deinit(i2s_stream_);
         audio_element_deinit(mp3_decoder_);
         audio_element_deinit(http_stream_);
         audio_pipeline_deinit(pipeline_);
@@ -107,6 +106,8 @@ bool Mp3Decoder::Initialize(int sample_rate, int channels) {
     
     initialized_ = true;
     ESP_LOGI(TAG, "ESP-ADF MP3 decoder pipeline initialized successfully");
+    ESP_LOGI(TAG, "Pipeline: %p, HTTP stream: %p, MP3 decoder: %p, I2S stream: %p", 
+             pipeline_, http_stream_, mp3_decoder_, i2s_stream_);
     return true;
 }
 
@@ -116,21 +117,45 @@ bool Mp3Decoder::PlayUrl(const std::string& url) {
         return false;
     }
     
+    if (!http_stream_) {
+        ESP_LOGE(TAG, "HTTP stream is null");
+        return false;
+    }
+    
+    if (!pipeline_) {
+        ESP_LOGE(TAG, "Audio pipeline is null");
+        return false;
+    }
+    
     ESP_LOGI(TAG, "Starting MP3 playback from URL: %s", url.c_str());
     
     // 设置HTTP流的URL
-    if (audio_element_set_uri(http_stream_, url.c_str()) != ESP_OK) {
-        ESP_LOGE(TAG, "Failed to set URI for HTTP stream");
+    esp_err_t ret = audio_element_set_uri(http_stream_, url.c_str());
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to set URI for HTTP stream, error: %s", esp_err_to_name(ret));
         return false;
     }
     
-    // 启动音频管道
-    if (audio_pipeline_run(pipeline_) != ESP_OK) {
-        ESP_LOGE(TAG, "Failed to start audio pipeline");
+    ESP_LOGI(TAG, "URI set successfully, starting pipeline");
+    
+    // 启动音频管道（只包含HTTP和MP3解码器）
+    ret = audio_pipeline_run(pipeline_);
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to start audio pipeline, error: %s", esp_err_to_name(ret));
         return false;
     }
     
-    ESP_LOGI(TAG, "MP3 playback started successfully");
+    ESP_LOGI(TAG, "MP3 playback started successfully (without I2S output)");
+    ESP_LOGI(TAG, "Note: PCM data will be available through DecodeChunk method");
+    
+    // 等待一小段时间让MP3解码器开始工作，然后检测采样率
+    vTaskDelay(pdMS_TO_TICKS(100));
+    
+    // 暂时禁用重采样器，直接使用MP3的原始采样率
+    // 这样可以避免重采样器初始化失败的问题
+    ESP_LOGI(TAG, "Skipping resampler setup for now, using MP3 original sample rate");
+    resampler_.reset();
+    
     return true;
 }
 
@@ -162,16 +187,11 @@ void Mp3Decoder::Deinitialize() {
         audio_pipeline_wait_for_stop(pipeline_);
         audio_pipeline_terminate(pipeline_);
         
-        // 注销所有元素
+        // 注销所有元素（不包含I2S流）
         audio_pipeline_unregister(pipeline_, http_stream_);
         audio_pipeline_unregister(pipeline_, mp3_decoder_);
-        audio_pipeline_unregister(pipeline_, i2s_stream_);
         
-        // 销毁所有元素
-        if (i2s_stream_) {
-            audio_element_deinit(i2s_stream_);
-            i2s_stream_ = nullptr;
-        }
+        // 销毁所有元素（不包含I2S流）
         if (mp3_decoder_) {
             audio_element_deinit(mp3_decoder_);
             mp3_decoder_ = nullptr;
@@ -179,6 +199,10 @@ void Mp3Decoder::Deinitialize() {
         if (http_stream_) {
             audio_element_deinit(http_stream_);
             http_stream_ = nullptr;
+        }
+        if (output_ringbuf_) {
+            rb_destroy(output_ringbuf_);
+            output_ringbuf_ = nullptr;
         }
         
         // 销毁管道
@@ -196,12 +220,103 @@ void Mp3Decoder::Deinitialize() {
 std::vector<int16_t> Mp3Decoder::DecodeChunk(const std::vector<uint8_t>& mp3_data) {
     std::vector<int16_t> pcm_data;
     
-    // 注意：由于我们现在使用完整的音频管道（HTTP -> MP3 -> I2S），
-    // DecodeChunk方法不再需要。数据会通过HTTP流自动流入，
-    // 通过MP3解码器自动解码，通过I2S流自动输出到硬件。
-    // 这个方法保留用于兼容性，但实际不会使用。
+    if (!initialized_ || !mp3_decoder_) {
+        ESP_LOGE(TAG, "MP3 decoder not initialized");
+        return pcm_data;
+    }
     
-    ESP_LOGD(TAG, "DecodeChunk called but using direct pipeline playback - returning empty data");
+    if (mp3_data.empty()) {
+        return pcm_data;
+    }
+    
+    ESP_LOGD(TAG, "DecodeChunk called with %zu bytes of MP3 data", mp3_data.size());
+    
+    // 使用ESP-ADF的音频缓冲区API来获取PCM数据
+    // 从MP3解码器的输出环形缓冲区读取PCM数据
+    
+    // 获取MP3解码器的输出环形缓冲区
+    ringbuf_handle_t output_rb = audio_element_get_output_ringbuf(mp3_decoder_);
+    if (!output_rb) {
+        ESP_LOGD(TAG, "Failed to get output ringbuf from MP3 decoder");
+        return pcm_data;
+    }
+    
+    // 从输出环形缓冲区读取PCM数据
+    char output_buffer[4096];
+    int bytes_read = rb_read(output_rb, output_buffer, sizeof(output_buffer), 0); // 非阻塞读取
+    if (bytes_read > 0) {
+        // 将字节数据转换为int16_t PCM数据
+        int16_t* pcm_samples = reinterpret_cast<int16_t*>(output_buffer);
+        int sample_count = bytes_read / sizeof(int16_t);
+        
+        pcm_data.resize(sample_count);
+        std::memcpy(pcm_data.data(), pcm_samples, bytes_read);
+        
+        ESP_LOGD(TAG, "MP3 decode: got %zu PCM samples from decoder", pcm_data.size());
+    } else {
+        ESP_LOGD(TAG, "MP3 decode: no PCM data available (bytes_read=%d)", bytes_read);
+    }
+    return pcm_data;
+}
+
+// 新增方法：从MP3解码器获取PCM数据
+std::vector<int16_t> Mp3Decoder::GetPcmData() {
+    std::vector<int16_t> pcm_data;
+    
+    if (!initialized_ || !output_ringbuf_) {
+        return pcm_data;
+    }
+    
+    // 从我们创建的输出缓冲区读取PCM数据，提高流畅度
+    char output_buffer[2048];  // 增加缓冲区大小，提高流畅度
+    int bytes_read = rb_read(output_ringbuf_, output_buffer, sizeof(output_buffer), 0); // 非阻塞读取
+    if (bytes_read > 0) {
+        // 将字节数据转换为int16_t PCM数据
+        int16_t* pcm_samples = reinterpret_cast<int16_t*>(output_buffer);
+        int sample_count = bytes_read / sizeof(int16_t);
+        
+        // 安全检查，避免过大的内存分配，平衡样本数量
+        if (sample_count > 0 && sample_count < 1500) {  // 限制每次最多1500个样本，平衡流畅度和丢包
+            std::vector<int16_t> raw_pcm_data(sample_count);
+            std::memcpy(raw_pcm_data.data(), pcm_samples, bytes_read);
+            
+            // 简单的重采样：44100Hz -> 24000Hz
+            const int input_sample_rate = 44100;
+            const int output_sample_rate = 24000;
+            
+            if (input_sample_rate != output_sample_rate) {
+                // 最简单的重采样：每2个样本取1个 (44100/2 = 22050，接近24000)
+                int output_samples = raw_pcm_data.size() / 2;
+                if (output_samples > 0) {
+                    pcm_data.resize(output_samples);
+                    for (int i = 0; i < output_samples; i++) {
+                        pcm_data[i] = raw_pcm_data[i * 2];
+                    }
+                    ESP_LOGD(TAG, "Simple resampled %zu samples to %zu samples", raw_pcm_data.size(), pcm_data.size());
+                } else {
+                    pcm_data = std::move(raw_pcm_data);
+                }
+            } else {
+                // 采样率相同，直接使用原始数据
+                pcm_data = std::move(raw_pcm_data);
+                ESP_LOGD(TAG, "Got %zu PCM samples from MP3 decoder (no resampling)", pcm_data.size());
+            }
+        } else {
+            ESP_LOGW(TAG, "Invalid sample count: %d, skipping this chunk", sample_count);
+        }
+    }
     
     return pcm_data;
+}
+
+// 设置重采样器
+void Mp3Decoder::SetResampler(int input_sample_rate, int output_sample_rate) {
+    if (input_sample_rate != output_sample_rate) {
+        ESP_LOGI(TAG, "Setting up simple resampler: %d Hz -> %d Hz", input_sample_rate, output_sample_rate);
+        // 暂时不使用OpusResampler，直接设置重采样参数
+        // 我们将在GetPcmData中实现简单的重采样
+    } else {
+        ESP_LOGI(TAG, "No resampling needed: %d Hz", input_sample_rate);
+        resampler_.reset();
+    }
 }

@@ -172,6 +172,7 @@ private:
 
     // MP3音乐流任务
     void MusicStreamTask();
+    void Mp3PcmDataTask(); // 从MP3解码器获取PCM数据的任务
     std::vector<int16_t> DecodeMp3Chunk(const std::vector<uint8_t>& mp3_data);
     std::vector<int16_t> DecodeWavChunk(const std::vector<uint8_t>& wav_data);
 };

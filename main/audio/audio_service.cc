@@ -154,7 +154,7 @@ void AudioService::Start() {
         AudioService* audio_service = (AudioService*)arg;
         audio_service->MusicStreamTask();
         vTaskDelete(NULL);
-    }, "music_stream", 2048 * 3, this, 4, &music_task_handle_);
+    }, "music_stream", 2048 * 6, this, 4, &music_task_handle_);  // 增加栈大小到12KB
 }
 
 void AudioService::Stop() {
@@ -709,13 +709,35 @@ void AudioService::PlayMusicFromUrl(const std::string& url) {
         StopMusic();
     }
     
-    // 使用ESP-ADF MP3解码器直接播放（动态I2S切换）
-    if (mp3_decoder_ && mp3_decoder_->PlayUrl(url)) {
+    // 初始化MP3解码器（如果尚未初始化）
+    if (!mp3_decoder_) {
+        ESP_LOGI(TAG, "Initializing MP3 decoder for URL playback");
+        mp3_decoder_ = std::make_unique<Mp3Decoder>();
+        if (!mp3_decoder_->Initialize(24000, codec_->output_channels())) {  // 回到24kHz采样率
+            ESP_LOGE(TAG, "Failed to initialize MP3 decoder");
+            mp3_decoder_.reset();
+            return;
+        }
+        ESP_LOGI(TAG, "MP3 decoder initialized successfully");
+    }
+    
+    // 使用ESP-ADF的完整管道播放MP3（避免手动解码导致的内存问题）
+    ESP_LOGI(TAG, "Starting ESP-ADF pipeline MP3 playback for URL: %s", url.c_str());
+    
+    // 设置HTTP流的URL并启动管道
+    if (mp3_decoder_->PlayUrl(url)) {
         current_music_url_ = url;
         music_playing_ = true;
-        ESP_LOGI(TAG, "Started ESP-ADF MP3 playback from: %s", url.c_str());
+        ESP_LOGI(TAG, "Started ESP-ADF pipeline MP3 playback from: %s", url.c_str());
+        
+                            // 启动一个任务来定期获取PCM数据并推送到播放队列
+                    xTaskCreate([](void* arg) {
+                        AudioService* audio_service = (AudioService*)arg;
+                        audio_service->Mp3PcmDataTask();
+                        vTaskDelete(NULL);
+                    }, "mp3_pcm_task", 8192, this, 5, nullptr);  // 增加栈大小到8KB
     } else {
-        ESP_LOGE(TAG, "Failed to start MP3 playback");
+        ESP_LOGE(TAG, "Failed to start ESP-ADF pipeline MP3 playback");
     }
 }
 
@@ -803,7 +825,7 @@ void AudioService::MusicStreamTask() {
                                 // 推送到统一的音频播放队列
                                 {
                                     std::lock_guard<std::mutex> lock(audio_playback_mutex_);
-                                                                    if (audio_playback_queue_.size() < 30) { // 进一步增大队列大小
+                                if (audio_playback_queue_.size() < 500) {  // 大幅增加队列大小到500 // 进一步增大队列大小
                                     audio_playback_queue_.push_back(std::move(pcm_data));
                                     ESP_LOGD(TAG, "Added PCM data to queue, queue size: %zu", 
                                             audio_playback_queue_.size());
@@ -855,7 +877,7 @@ std::vector<int16_t> AudioService::DecodeMp3Chunk(const std::vector<uint8_t>& mp
     // 初始化MP3解码器（如果尚未初始化）
     if (!mp3_decoder_) {
         mp3_decoder_ = std::make_unique<Mp3Decoder>();
-        if (!mp3_decoder_->Initialize(codec_->output_sample_rate(), codec_->output_channels())) {
+        if (!mp3_decoder_->Initialize(24000, codec_->output_channels())) {  // 回到24kHz采样率
             ESP_LOGE(TAG, "Failed to initialize MP3 decoder");
             mp3_decoder_.reset();
             return pcm_data;
@@ -910,4 +932,36 @@ std::vector<int16_t> AudioService::DecodeWavChunk(const std::vector<uint8_t>& wa
     ESP_LOGD(TAG, "WAV decode: %zu bytes -> %zu PCM samples", data_size, pcm_data.size());
     
     return pcm_data;
+}
+
+void AudioService::Mp3PcmDataTask() {
+    ESP_LOGI(TAG, "MP3 PCM data task started");
+    
+    while (music_playing_) {
+        if (mp3_decoder_) {
+            // 从MP3解码器获取PCM数据
+            std::vector<int16_t> pcm_data = mp3_decoder_->GetPcmData();
+                if (!pcm_data.empty()) {
+                // 推送到统一的音频播放队列
+                        {
+                            std::lock_guard<std::mutex> lock(audio_playback_mutex_);
+                            if (audio_playback_queue_.size() < 200) {  // 进一步增加队列大小到200
+                                audio_playback_queue_.push_back(std::move(pcm_data));
+                                ESP_LOGD(TAG, "Added MP3 PCM data to queue, queue size: %zu", 
+                                        audio_playback_queue_.size());
+                            } else {
+                                    // 队列满了，跳过一些数据以减少丢包
+                                    static int skip_count = 0;
+                                    skip_count++;
+                                    if (skip_count % 10 == 0) {  // 每10次丢包才记录一次日志，减少日志输出
+                                        ESP_LOGW(TAG, "Audio playback queue full, dropping MP3 PCM data (dropped %d times)", skip_count);
+                                    }
+                            }
+                        }
+                    }
+        }
+        vTaskDelay(pdMS_TO_TICKS(8)); // 8ms间隔，提高流畅度
+    }
+    
+    ESP_LOGI(TAG, "MP3 PCM data task ended");
 }

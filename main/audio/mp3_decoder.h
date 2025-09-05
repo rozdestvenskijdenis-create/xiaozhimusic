@@ -10,6 +10,9 @@
 #include "audio_pipeline.h"
 #include "codec/mp3_decoder.h"
 
+// Forward declaration
+class OpusResampler;
+
 class Mp3Decoder {
 public:
     Mp3Decoder();
@@ -22,6 +25,10 @@ public:
     void Stop();
     
     std::vector<int16_t> DecodeChunk(const std::vector<uint8_t>& mp3_data);
+    std::vector<int16_t> GetPcmData(); // 从MP3解码器获取PCM数据
+    
+    // 设置重采样器
+    void SetResampler(int input_sample_rate, int output_sample_rate);
 
 private:
     bool initialized_;
@@ -39,6 +46,12 @@ private:
     
     // 输出缓冲区
     std::vector<int16_t> output_buffer_;
+    
+    // ESP-ADF音频缓冲区
+    ringbuf_handle_t output_ringbuf_;
+    
+    // 重采样器
+    std::unique_ptr<OpusResampler> resampler_;
     
     static const char* TAG;
 };
