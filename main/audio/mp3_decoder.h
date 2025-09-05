@@ -3,6 +3,12 @@
 
 #include <vector>
 #include <cstdint>
+#include <memory>
+
+// ESP-ADF includes
+#include "audio_element.h"
+#include "audio_pipeline.h"
+#include "codec/mp3_decoder.h"
 
 class Mp3Decoder {
 public:
@@ -12,6 +18,9 @@ public:
     bool Initialize(int sample_rate, int channels);
     void Deinitialize();
     
+    bool PlayUrl(const std::string& url);
+    void Stop();
+    
     std::vector<int16_t> DecodeChunk(const std::vector<uint8_t>& mp3_data);
 
 private:
@@ -19,9 +28,17 @@ private:
     int sample_rate_;
     int channels_;
     
-    // 简单的MP3解码器实现
-    // 注意：这是一个占位符实现，实际项目中应该使用真正的MP3解码库
+    // ESP-ADF音频管道组件
+    audio_pipeline_handle_t pipeline_;
+    audio_element_handle_t mp3_decoder_;
+    audio_element_handle_t http_stream_;
+    audio_element_handle_t i2s_stream_;
+    
+    // MP3数据缓冲区
     std::vector<uint8_t> mp3_buffer_;
+    
+    // 输出缓冲区
+    std::vector<int16_t> output_buffer_;
     
     static const char* TAG;
 };

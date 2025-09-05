@@ -22,8 +22,7 @@
 AudioService::AudioService() {
     event_group_ = xEventGroupCreate();
     
-    // 初始化ESP-ADF MP3播放器
-    esp_adf_mp3_player_ = std::make_unique<EspAdfMp3Player>();
+    // 注意：不再创建ESP-ADF MP3播放器，避免I2S冲突
 }
 
 AudioService::~AudioService() {
@@ -37,11 +36,7 @@ AudioService::~AudioService() {
         mp3_decoder_.reset();
     }
     
-    // 清理ESP-ADF MP3播放器
-    if (esp_adf_mp3_player_) {
-        esp_adf_mp3_player_->Deinitialize();
-        esp_adf_mp3_player_.reset();
-    }
+    // 注意：不再使用ESP-ADF MP3播放器
 }
 
 
@@ -106,18 +101,9 @@ void AudioService::Initialize(AudioCodec* codec) {
     };
     esp_timer_create(&audio_power_timer_args, &audio_power_timer_);
     
-    // 初始化ESP-ADF MP3播放器
-    if (esp_adf_mp3_player_) {
-        ESP_LOGI(TAG, "Attempting to initialize ESP-ADF MP3 player with sample_rate=%d, channels=%d", 
-                 codec_->output_sample_rate(), codec_->output_channels());
-        if (esp_adf_mp3_player_->Initialize(codec_->output_sample_rate(), codec_->output_channels())) {
-            ESP_LOGI(TAG, "ESP-ADF MP3 player initialized successfully");
-        } else {
-            ESP_LOGE(TAG, "Failed to initialize ESP-ADF MP3 player");
-        }
-    } else {
-        ESP_LOGE(TAG, "ESP-ADF MP3 player is null");
-    }
+    // 注意：禁用ESP-ADF MP3播放器初始化，避免I2S通道冲突
+    // 使用自定义Mp3Decoder + PCM播放通道的方案
+    ESP_LOGI(TAG, "ESP-ADF MP3 player initialization disabled to avoid I2S conflicts");
 }
 
 void AudioService::Start() {
@@ -723,20 +709,13 @@ void AudioService::PlayMusicFromUrl(const std::string& url) {
         StopMusic();
     }
     
-    // 使用ESP-ADF MP3播放器播放
-    if (esp_adf_mp3_player_ && esp_adf_mp3_player_->IsInitialized()) {
-        if (esp_adf_mp3_player_->PlayUrl(url)) {
-            current_music_url_ = url;
-            music_playing_ = true;
-            ESP_LOGI(TAG, "Started ESP-ADF MP3 playback from: %s", url.c_str());
-        } else {
-            ESP_LOGE(TAG, "Failed to start ESP-ADF MP3 playback");
-        }
-    } else {
-        ESP_LOGW(TAG, "ESP-ADF MP3 player not available, falling back to custom implementation");
+    // 使用ESP-ADF MP3解码器直接播放（动态I2S切换）
+    if (mp3_decoder_ && mp3_decoder_->PlayUrl(url)) {
         current_music_url_ = url;
         music_playing_ = true;
-        ESP_LOGI(TAG, "Starting custom MP3 stream from: %s", url.c_str());
+        ESP_LOGI(TAG, "Started ESP-ADF MP3 playback from: %s", url.c_str());
+    } else {
+        ESP_LOGE(TAG, "Failed to start MP3 playback");
     }
 }
 
@@ -744,10 +723,10 @@ void AudioService::StopMusic() {
     music_playing_ = false;
     current_music_url_.clear();
     
-    // 停止ESP-ADF MP3播放器
-    if (esp_adf_mp3_player_ && esp_adf_mp3_player_->IsInitialized()) {
-        esp_adf_mp3_player_->Stop();
-        ESP_LOGI(TAG, "ESP-ADF MP3 player stopped");
+    // 停止ESP-ADF MP3解码器
+    if (mp3_decoder_) {
+        mp3_decoder_->Stop();
+        ESP_LOGI(TAG, "ESP-ADF MP3 decoder stopped");
     }
     
     // 清空音频播放队列
