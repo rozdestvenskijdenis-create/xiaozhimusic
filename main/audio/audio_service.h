@@ -21,7 +21,7 @@
 #include "processors/audio_debugger.h"
 #include "wake_word.h"
 #include "protocol.h"
-#include "mp3_decoder.h"
+#include "m4a_decoder.h"
 #include "esp_adf_mp3_player.h"
 
 
@@ -146,8 +146,8 @@ private:
     std::string current_music_url_;
     TaskHandle_t music_task_handle_ = nullptr;
     
-    // MP3解码器
-    std::unique_ptr<Mp3Decoder> mp3_decoder_;
+    // M4A解码器
+    std::unique_ptr<M4aDecoder> m4a_decoder_;
     
     // ESP-ADF MP3播放器
     std::unique_ptr<EspAdfMp3Player> esp_adf_mp3_player_;
@@ -172,8 +172,8 @@ private:
 
     // MP3音乐流任务
     void MusicStreamTask();
-    void Mp3PcmDataTask(); // 从MP3解码器获取PCM数据的任务
-    std::vector<int16_t> DecodeMp3Chunk(const std::vector<uint8_t>& mp3_data);
+    void M4aPcmDataTask(); // 从M4A解码器获取PCM数据的任务
+    std::vector<int16_t> DecodeM4aChunk(const std::vector<uint8_t>& m4a_data);
     std::vector<int16_t> DecodeWavChunk(const std::vector<uint8_t>& wav_data);
 };
 

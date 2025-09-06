@@ -30,10 +30,10 @@ AudioService::~AudioService() {
         vEventGroupDelete(event_group_);
     }
     
-    // 清理MP3解码器
-    if (mp3_decoder_) {
-        mp3_decoder_->Deinitialize();
-        mp3_decoder_.reset();
+    // 清理M4A解码器
+    if (m4a_decoder_) {
+        m4a_decoder_->Deinitialize();
+        m4a_decoder_.reset();
     }
     
     // 注意：不再使用ESP-ADF MP3播放器
@@ -125,7 +125,7 @@ void AudioService::Start() {
         AudioService* audio_service = (AudioService*)arg;
         audio_service->AudioOutputTask();
         vTaskDelete(NULL);
-    }, "audio_output", 2048 * 2, this, 3, &audio_output_task_handle_);
+    }, "audio_output", 2048 * 2, this, 6, &audio_output_task_handle_);  // 提高优先级到6
 #else
     /* Start the audio input task */
     xTaskCreate([](void* arg) {
@@ -139,7 +139,7 @@ void AudioService::Start() {
         AudioService* audio_service = (AudioService*)arg;
         audio_service->AudioOutputTask();
         vTaskDelete(NULL);
-    }, "audio_output", 2048, this, 3, &audio_output_task_handle_);
+    }, "audio_output", 2048, this, 6, &audio_output_task_handle_);  // 提高优先级到6
 #endif
 
     /* Start the opus codec task */
@@ -709,35 +709,35 @@ void AudioService::PlayMusicFromUrl(const std::string& url) {
         StopMusic();
     }
     
-    // 初始化MP3解码器（如果尚未初始化）
-    if (!mp3_decoder_) {
-        ESP_LOGI(TAG, "Initializing MP3 decoder for URL playback");
-        mp3_decoder_ = std::make_unique<Mp3Decoder>();
-        if (!mp3_decoder_->Initialize(24000, codec_->output_channels())) {  // 回到24kHz采样率
-            ESP_LOGE(TAG, "Failed to initialize MP3 decoder");
-            mp3_decoder_.reset();
+    // 初始化M4A解码器（如果尚未初始化）
+    if (!m4a_decoder_) {
+        ESP_LOGI(TAG, "Initializing M4A decoder for URL playback");
+        m4a_decoder_ = std::make_unique<M4aDecoder>();
+        if (!m4a_decoder_->Initialize(44100, codec_->output_channels())) {  // 使用标准44.1kHz采样率
+            ESP_LOGE(TAG, "Failed to initialize M4A decoder");
+            m4a_decoder_.reset();
             return;
         }
-        ESP_LOGI(TAG, "MP3 decoder initialized successfully");
+        ESP_LOGI(TAG, "M4A decoder initialized successfully");
     }
     
-    // 使用ESP-ADF的完整管道播放MP3（避免手动解码导致的内存问题）
-    ESP_LOGI(TAG, "Starting ESP-ADF pipeline MP3 playback for URL: %s", url.c_str());
+    // 使用ESP-ADF的完整管道播放M4A（避免手动解码导致的内存问题）
+    ESP_LOGI(TAG, "Starting ESP-ADF pipeline M4A playback for URL: %s", url.c_str());
     
     // 设置HTTP流的URL并启动管道
-    if (mp3_decoder_->PlayUrl(url)) {
+    if (m4a_decoder_->PlayUrl(url)) {
         current_music_url_ = url;
         music_playing_ = true;
-        ESP_LOGI(TAG, "Started ESP-ADF pipeline MP3 playback from: %s", url.c_str());
+        ESP_LOGI(TAG, "Started ESP-ADF pipeline M4A playback from: %s", url.c_str());
         
                             // 启动一个任务来定期获取PCM数据并推送到播放队列
                     xTaskCreate([](void* arg) {
                         AudioService* audio_service = (AudioService*)arg;
-                        audio_service->Mp3PcmDataTask();
+                        audio_service->M4aPcmDataTask();
                         vTaskDelete(NULL);
-                    }, "mp3_pcm_task", 8192, this, 5, nullptr);  // 增加栈大小到8KB
+                    }, "m4a_pcm_task", 8192, this, 4, nullptr);  // 降低优先级到4，避免抢占音频输出
     } else {
-        ESP_LOGE(TAG, "Failed to start ESP-ADF pipeline MP3 playback");
+        ESP_LOGE(TAG, "Failed to start ESP-ADF pipeline M4A playback");
     }
 }
 
@@ -745,10 +745,10 @@ void AudioService::StopMusic() {
     music_playing_ = false;
     current_music_url_.clear();
     
-    // 停止ESP-ADF MP3解码器
-    if (mp3_decoder_) {
-        mp3_decoder_->Stop();
-        ESP_LOGI(TAG, "ESP-ADF MP3 decoder stopped");
+    // 停止ESP-ADF M4A解码器
+    if (m4a_decoder_) {
+        m4a_decoder_->Stop();
+        ESP_LOGI(TAG, "ESP-ADF M4A decoder stopped");
     }
     
     // 清空音频播放队列
@@ -758,11 +758,11 @@ void AudioService::StopMusic() {
     }
     audio_playback_cv_.notify_all();
     
-    // 清理MP3解码器
-    if (mp3_decoder_) {
-        mp3_decoder_->Deinitialize();
-        mp3_decoder_.reset();
-        ESP_LOGI(TAG, "MP3 decoder cleaned up");
+    // 清理M4A解码器
+    if (m4a_decoder_) {
+        m4a_decoder_->Deinitialize();
+        m4a_decoder_.reset();
+        ESP_LOGI(TAG, "M4A decoder cleaned up");
     }
     
     ESP_LOGI(TAG, "Music stopped");
@@ -813,19 +813,18 @@ void AudioService::MusicStreamTask() {
                                 ESP_LOGD(TAG, "Detected WAV format, using WAV decoder");
                                 pcm_data = DecodeWavChunk(mp3_buffer);
                             } else if (current_music_url_.find(".m4a") != std::string::npos) {
-                                ESP_LOGW(TAG, "M4A format not supported yet, skipping");
-                                mp3_buffer.clear();
-                                continue;
+                                ESP_LOGD(TAG, "Using M4A decoder");
+                                pcm_data = DecodeM4aChunk(mp3_buffer);
                             } else {
-                                ESP_LOGD(TAG, "Using MP3 decoder");
-                                pcm_data = DecodeMp3Chunk(mp3_buffer);
+                                ESP_LOGW(TAG, "MP3 format not supported, using M4A decoder as fallback");
+                                pcm_data = DecodeM4aChunk(mp3_buffer);
                             }
                             
                             if (!pcm_data.empty()) {
                                 // 推送到统一的音频播放队列
                                 {
                                     std::lock_guard<std::mutex> lock(audio_playback_mutex_);
-                                if (audio_playback_queue_.size() < 500) {  // 大幅增加队列大小到500 // 进一步增大队列大小
+                                if (audio_playback_queue_.size() < 1000) {  // 大幅增加队列大小到1000
                                     audio_playback_queue_.push_back(std::move(pcm_data));
                                     ESP_LOGD(TAG, "Added PCM data to queue, queue size: %zu", 
                                             audio_playback_queue_.size());
@@ -867,30 +866,30 @@ void AudioService::MusicStreamTask() {
     }
 }
 
-std::vector<int16_t> AudioService::DecodeMp3Chunk(const std::vector<uint8_t>& mp3_data) {
+std::vector<int16_t> AudioService::DecodeM4aChunk(const std::vector<uint8_t>& m4a_data) {
     std::vector<int16_t> pcm_data;
     
-    if (mp3_data.empty()) {
+    if (m4a_data.empty()) {
         return pcm_data;
     }
     
-    // 初始化MP3解码器（如果尚未初始化）
-    if (!mp3_decoder_) {
-        mp3_decoder_ = std::make_unique<Mp3Decoder>();
-        if (!mp3_decoder_->Initialize(24000, codec_->output_channels())) {  // 回到24kHz采样率
-            ESP_LOGE(TAG, "Failed to initialize MP3 decoder");
-            mp3_decoder_.reset();
+    // 初始化M4A解码器（如果尚未初始化）
+    if (!m4a_decoder_) {
+        m4a_decoder_ = std::make_unique<M4aDecoder>();
+        if (!m4a_decoder_->Initialize(44100, codec_->output_channels())) {  // 使用标准44.1kHz采样率
+            ESP_LOGE(TAG, "Failed to initialize M4A decoder");
+            m4a_decoder_.reset();
             return pcm_data;
         }
-        ESP_LOGI(TAG, "MP3 decoder initialized successfully");
+        ESP_LOGI(TAG, "M4A decoder initialized successfully");
     }
     
-    // 使用真正的MP3解码器解码数据
-    pcm_data = mp3_decoder_->DecodeChunk(mp3_data);
+    // 使用真正的M4A解码器解码数据
+    pcm_data = m4a_decoder_->DecodeChunk(m4a_data);
     
     if (!pcm_data.empty()) {
-        ESP_LOGD(TAG, "MP3 decode: %zu bytes -> %zu PCM samples", 
-                 mp3_data.size(), pcm_data.size());
+        ESP_LOGD(TAG, "M4A decode: %zu bytes -> %zu PCM samples", 
+                 m4a_data.size(), pcm_data.size());
     }
     
     return pcm_data;
@@ -934,34 +933,43 @@ std::vector<int16_t> AudioService::DecodeWavChunk(const std::vector<uint8_t>& wa
     return pcm_data;
 }
 
-void AudioService::Mp3PcmDataTask() {
-    ESP_LOGI(TAG, "MP3 PCM data task started");
+void AudioService::M4aPcmDataTask() {
+    ESP_LOGI(TAG, "M4A PCM data task started");
     
     while (music_playing_) {
-        if (mp3_decoder_) {
-            // 从MP3解码器获取PCM数据
-            std::vector<int16_t> pcm_data = mp3_decoder_->GetPcmData();
+        if (m4a_decoder_) {
+            // 检查队列状态，如果队列太满就暂停数据生产
+            {
+                std::lock_guard<std::mutex> lock(audio_playback_mutex_);
+                if (audio_playback_queue_.size() > 800) {  // 队列超过800就暂停
+                    vTaskDelay(pdMS_TO_TICKS(50)); // 暂停50ms
+                    continue;
+                }
+            }
+            
+            // 从M4A解码器获取PCM数据
+            std::vector<int16_t> pcm_data = m4a_decoder_->GetPcmData();
                 if (!pcm_data.empty()) {
                 // 推送到统一的音频播放队列
                         {
                             std::lock_guard<std::mutex> lock(audio_playback_mutex_);
-                            if (audio_playback_queue_.size() < 200) {  // 进一步增加队列大小到200
+                            if (audio_playback_queue_.size() < 1000) {  // 大幅增加队列大小到1000
                                 audio_playback_queue_.push_back(std::move(pcm_data));
-                                ESP_LOGD(TAG, "Added MP3 PCM data to queue, queue size: %zu", 
+                                ESP_LOGD(TAG, "Added M4A PCM data to queue, queue size: %zu", 
                                         audio_playback_queue_.size());
                             } else {
                                     // 队列满了，跳过一些数据以减少丢包
                                     static int skip_count = 0;
                                     skip_count++;
                                     if (skip_count % 10 == 0) {  // 每10次丢包才记录一次日志，减少日志输出
-                                        ESP_LOGW(TAG, "Audio playback queue full, dropping MP3 PCM data (dropped %d times)", skip_count);
+                                        ESP_LOGW(TAG, "Audio playback queue full, dropping M4A PCM data (dropped %d times)", skip_count);
                                     }
                             }
                         }
                     }
         }
-        vTaskDelay(pdMS_TO_TICKS(8)); // 8ms间隔，提高流畅度
+        vTaskDelay(pdMS_TO_TICKS(20)); // 20ms间隔，减少数据生产速度
     }
     
-    ESP_LOGI(TAG, "MP3 PCM data task ended");
+    ESP_LOGI(TAG, "M4A PCM data task ended");
 }

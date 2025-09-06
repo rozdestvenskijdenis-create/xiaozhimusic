@@ -1,6 +1,6 @@
 set(SOURCES "audio/audio_codec.cc"
             "audio/audio_service.cc"
-            "audio/mp3_decoder.cc"
+            "audio/m4a_decoder.cc"
             "audio/esp_adf_mp3_player.cc"
             "audio/codecs/no_audio_codec.cc"
             "audio/codecs/box_audio_codec.cc"

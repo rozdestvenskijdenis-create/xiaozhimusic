@@ -1,5 +1,5 @@
-#ifndef MP3_DECODER_H
-#define MP3_DECODER_H
+#ifndef M4A_DECODER_H
+#define M4A_DECODER_H
 
 #include <vector>
 #include <cstdint>
@@ -8,15 +8,15 @@
 // ESP-ADF includes
 #include "audio_element.h"
 #include "audio_pipeline.h"
-#include "codec/mp3_decoder.h"
+#include "codec/aac_decoder.h"
 
 // Forward declaration
 class OpusResampler;
 
-class Mp3Decoder {
+class M4aDecoder {
 public:
-    Mp3Decoder();
-    ~Mp3Decoder();
+    M4aDecoder();
+    ~M4aDecoder();
 
     bool Initialize(int sample_rate, int channels);
     void Deinitialize();
@@ -24,8 +24,8 @@ public:
     bool PlayUrl(const std::string& url);
     void Stop();
     
-    std::vector<int16_t> DecodeChunk(const std::vector<uint8_t>& mp3_data);
-    std::vector<int16_t> GetPcmData(); // 从MP3解码器获取PCM数据
+    std::vector<int16_t> DecodeChunk(const std::vector<uint8_t>& m4a_data);
+    std::vector<int16_t> GetPcmData(); // 从M4A解码器获取PCM数据
     
     // 设置重采样器
     void SetResampler(int input_sample_rate, int output_sample_rate);
@@ -37,12 +37,12 @@ private:
     
     // ESP-ADF音频管道组件
     audio_pipeline_handle_t pipeline_;
-    audio_element_handle_t mp3_decoder_;
+    audio_element_handle_t m4a_decoder_;
     audio_element_handle_t http_stream_;
     audio_element_handle_t i2s_stream_;
     
-    // MP3数据缓冲区
-    std::vector<uint8_t> mp3_buffer_;
+    // M4A数据缓冲区
+    std::vector<uint8_t> m4a_buffer_;
     
     // 输出缓冲区
     std::vector<int16_t> output_buffer_;
@@ -56,4 +56,4 @@ private:
     static const char* TAG;
 };
 
-#endif // MP3_DECODER_H
+#endif // M4A_DECODER_H
