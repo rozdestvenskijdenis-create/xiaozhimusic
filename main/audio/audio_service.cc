@@ -968,7 +968,7 @@ void AudioService::M4aPcmDataTask() {
                         }
                     }
         }
-        vTaskDelay(pdMS_TO_TICKS(20)); // 20ms间隔，减少数据生产速度
+        vTaskDelay(pdMS_TO_TICKS(5)); // 5ms间隔，提高数据生产速度
     }
     
     ESP_LOGI(TAG, "M4A PCM data task ended");

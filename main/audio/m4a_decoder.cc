@@ -65,7 +65,7 @@ bool M4aDecoder::Initialize(int sample_rate, int channels) {
     }
     
     // 创建一个输出环形缓冲区来存储M4A解码后的PCM数据
-    output_ringbuf_ = rb_create(4096, 1);  // 4KB缓冲区
+    output_ringbuf_ = rb_create(16384, 1);  // 16KB缓冲区，提高44.1kHz音频的缓冲能力
     if (!output_ringbuf_) {
         ESP_LOGE(TAG, "Failed to create output ring buffer");
         audio_element_deinit(m4a_decoder_);
@@ -263,7 +263,7 @@ std::vector<int16_t> M4aDecoder::GetPcmData() {
     }
     
     // 从我们创建的输出缓冲区读取PCM数据，控制数据量
-    char output_buffer[1024];  // 减少缓冲区大小，控制数据流
+    char output_buffer[4096];  // 增加缓冲区大小，提高数据流
     int bytes_read = rb_read(output_ringbuf_, output_buffer, sizeof(output_buffer), 0); // 非阻塞读取
     if (bytes_read > 0) {
         // 将字节数据转换为int16_t PCM数据
@@ -271,7 +271,7 @@ std::vector<int16_t> M4aDecoder::GetPcmData() {
         int sample_count = bytes_read / sizeof(int16_t);
         
         // 安全检查，避免过大的内存分配，平衡样本数量
-        if (sample_count > 0 && sample_count < 800) {  // 限制每次最多800个样本，减少数据量
+        if (sample_count > 0 && sample_count < 3000) {  // 进一步增加样本限制，适应实际数据量
             std::vector<int16_t> raw_pcm_data(sample_count);
             std::memcpy(raw_pcm_data.data(), pcm_samples, bytes_read);
             
