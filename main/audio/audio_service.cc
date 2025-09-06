@@ -327,11 +327,13 @@ void AudioService::AudioOutputTask() {
                 esp_timer_start_periodic(audio_power_timer_, AUDIO_POWER_CHECK_INTERVAL_MS * 1000);
                 codec_->EnableOutput(true);
             }
+            ESP_LOGD(TAG, "Playing %zu PCM samples", audio_data.size());
             codec_->OutputData(audio_data);
             
             /* Update the last output time */
             last_output_time_ = std::chrono::steady_clock::now();
             debug_statistics_.playback_count++;
+
         }
     }
     ESP_LOGW(TAG, "Audio output task stopped");
@@ -941,8 +943,8 @@ void AudioService::M4aPcmDataTask() {
             // 检查队列状态，如果队列太满就暂停数据生产
             {
                 std::lock_guard<std::mutex> lock(audio_playback_mutex_);
-                if (audio_playback_queue_.size() > 800) {  // 队列超过800就暂停
-                    vTaskDelay(pdMS_TO_TICKS(50)); // 暂停50ms
+                if (audio_playback_queue_.size() > 900) {  // 队列超过900就暂停
+                    vTaskDelay(pdMS_TO_TICKS(10)); // 暂停10ms
                     continue;
                 }
             }
@@ -966,9 +968,10 @@ void AudioService::M4aPcmDataTask() {
                                     }
                             }
                         }
+                        audio_playback_cv_.notify_all();  // 通知音频输出任务处理新数据
                     }
         }
-        vTaskDelay(pdMS_TO_TICKS(5)); // 5ms间隔，提高数据生产速度
+        // 移除延迟，最大化数据生产速度
     }
     
     ESP_LOGI(TAG, "M4A PCM data task ended");

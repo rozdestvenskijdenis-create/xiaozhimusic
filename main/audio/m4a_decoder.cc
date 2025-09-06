@@ -143,9 +143,8 @@ bool M4aDecoder::PlayUrl(const std::string& url) {
     
     ESP_LOGI(TAG, "M4A playback started successfully (without I2S output)");
     ESP_LOGI(TAG, "Note: PCM data will be available through DecodeChunk method");
-    
-    // 等待一小段时间让M4A解码器开始工作
-    vTaskDelay(pdMS_TO_TICKS(100));
+    // 等待更长时间让M4A解码器完全启动并开始处理数据
+    vTaskDelay(pdMS_TO_TICKS(5000));
     
     // 暂时禁用重采样器，直接使用M4A的原始采样率
     ESP_LOGI(TAG, "Skipping resampler setup for now, using M4A original sample rate");
@@ -224,19 +223,14 @@ std::vector<int16_t> M4aDecoder::DecodeChunk(const std::vector<uint8_t>& m4a_dat
         return pcm_data;
     }
     
-    ESP_LOGD(TAG, "DecodeChunk called with %zu bytes of M4A data", m4a_data.size());
+    ESP_LOGI(TAG, "DecodeChunk called with %d bytes of M4A data", m4a_data.size());
     
-    // 使用ESP-ADF的音频缓冲区API来获取PCM数据
-    // 从M4A解码器的输出环形缓冲区读取PCM数据
-    
-    // 获取M4A解码器的输出环形缓冲区
     ringbuf_handle_t output_rb = audio_element_get_output_ringbuf(m4a_decoder_);
     if (!output_rb) {
-        ESP_LOGD(TAG, "Failed to get output ringbuf from M4A decoder");
+        ESP_LOGI(TAG, "Failed to get output ringbuf from M4A decoder");
         return pcm_data;
     }
     
-    // 从输出环形缓冲区读取PCM数据
     char output_buffer[4096];
     int bytes_read = rb_read(output_rb, output_buffer, sizeof(output_buffer), 0); // 非阻塞读取
     if (bytes_read > 0) {
@@ -247,9 +241,9 @@ std::vector<int16_t> M4aDecoder::DecodeChunk(const std::vector<uint8_t>& m4a_dat
         pcm_data.resize(sample_count);
         std::memcpy(pcm_data.data(), pcm_samples, bytes_read);
         
-        ESP_LOGD(TAG, "M4A decode: got %d PCM samples from decoder", pcm_data.size());
+        ESP_LOGI(TAG, "M4A decode: got %d PCM samples from decoder", pcm_data.size());
     } else {
-        ESP_LOGD(TAG, "M4A decode: no PCM data available (bytes_read=%d)", bytes_read);
+        ESP_LOGI(TAG, "M4A decode: no PCM data available (bytes_read=%d)", bytes_read);
     }
     return pcm_data;
 }
@@ -275,22 +269,26 @@ std::vector<int16_t> M4aDecoder::GetPcmData() {
             std::vector<int16_t> raw_pcm_data(sample_count);
             std::memcpy(raw_pcm_data.data(), pcm_samples, bytes_read);
             
-            // 使用标准44.1kHz采样率，不进行重采样
+            // 现在输入和输出都是44.1kHz，直接使用原始数据
             const int input_sample_rate = 44100;
-            const int output_sample_rate = 44100;  // 使用标准44.1kHz
+            const int output_sample_rate = 44100;  // 输出使用44.1kHz
             
             if (input_sample_rate != output_sample_rate) {
-                // 如果需要重采样，可以在这里实现
-                // 目前直接使用原始数据
-                pcm_data = std::move(raw_pcm_data);
-                ESP_LOGD(TAG, "Resampled %zu samples to %zu samples", raw_pcm_data.size(), pcm_data.size());
+                // 简单的重采样：22.05kHz -> 44.1kHz (2倍上采样)
+                int output_samples = raw_pcm_data.size() * 2;  // 2倍上采样
+                pcm_data.resize(output_samples);
+                for (int i = 0; i < raw_pcm_data.size(); i++) {
+                    pcm_data[i * 2] = raw_pcm_data[i];      // 原始样本
+                    pcm_data[i * 2 + 1] = raw_pcm_data[i];  // 重复样本（简单插值）
+                }
+                ESP_LOGI(TAG, "Resampled %zu samples to %zu samples (22.05kHz -> 44.1kHz)", raw_pcm_data.size(), pcm_data.size());
             } else {
                 // 采样率相同，直接使用原始数据
                 pcm_data = std::move(raw_pcm_data);
-                ESP_LOGD(TAG, "Got %zu PCM samples from M4A decoder at 44.1kHz (no resampling)", pcm_data.size());
+                ESP_LOGI(TAG, "Got %d PCM samples from M4A decoder at 44.1kHz (no resampling)", pcm_data.size());
             }
         } else {
-            ESP_LOGW(TAG, "Invalid sample count: %d, skipping this chunk", sample_count);
+            ESP_LOGI(TAG, "Invalid sample count: %d, skipping this chunk", sample_count);
         }
     }
     
