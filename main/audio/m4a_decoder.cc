@@ -53,8 +53,9 @@ bool M4aDecoder::Initialize(int sample_rate, int channels) {
         return false;
     }
     
-    // 创建M4A解码器 - 使用AAC解码器
+    // 创建M4A解码器 - 使用AAC解码器，让解码器自动检测采样率
     aac_decoder_cfg_t aac_cfg = DEFAULT_AAC_DECODER_CONFIG();
+    // DEFAULT_AAC_DECODER_CONFIG()已经配置为自动检测采样率和通道数
     m4a_decoder_ = aac_decoder_init(&aac_cfg);
     if (m4a_decoder_ == nullptr) {
         ESP_LOGE(TAG, "Failed to initialize M4A decoder");
@@ -269,23 +270,40 @@ std::vector<int16_t> M4aDecoder::GetPcmData() {
             std::vector<int16_t> raw_pcm_data(sample_count);
             std::memcpy(raw_pcm_data.data(), pcm_samples, bytes_read);
             
-            // 现在输入和输出都是44.1kHz，直接使用原始数据
-            const int input_sample_rate = 44100;
-            const int output_sample_rate = 44100;  // 输出使用44.1kHz
+            // 获取AAC解码器的实际输出采样率
+            int actual_sample_rate = 44100;  // 默认值
+            int actual_channels = 2;         // 默认值
             
-            if (input_sample_rate != output_sample_rate) {
-                // 简单的重采样：22.05kHz -> 44.1kHz (2倍上采样)
-                int output_samples = raw_pcm_data.size() * 2;  // 2倍上采样
-                pcm_data.resize(output_samples);
-                for (int i = 0; i < raw_pcm_data.size(); i++) {
-                    pcm_data[i * 2] = raw_pcm_data[i];      // 原始样本
-                    pcm_data[i * 2 + 1] = raw_pcm_data[i];  // 重复样本（简单插值）
+            // 尝试从AAC解码器获取实际的采样率信息
+            if (m4a_decoder_) {
+                // 从AAC解码器获取音频信息
+                audio_element_info_t info;
+                if (audio_element_getinfo(m4a_decoder_, &info) == ESP_OK) {
+                    actual_sample_rate = info.sample_rates;
+                    actual_channels = info.channels;
+                    ESP_LOGI(TAG, "AAC decoder actual output: %d Hz, %d channels", actual_sample_rate, actual_channels);
+                } else {
+                    ESP_LOGW(TAG, "Failed to get AAC decoder info, using defaults");
                 }
-                ESP_LOGI(TAG, "Resampled %zu samples to %zu samples (22.05kHz -> 44.1kHz)", raw_pcm_data.size(), pcm_data.size());
+            }
+            const int target_sample_rate = 24000; // 音频的实际输出速度，由系统决定
+            
+            if (actual_sample_rate != target_sample_rate) {
+                // 计算重采样比例
+                float ratio = (float)actual_sample_rate * actual_channels / target_sample_rate;
+        
+                int output_samples = raw_pcm_data.size() / ratio;
+                pcm_data.resize(output_samples);
+                //进行样本缩小，提高播放速度
+                for (int i = 0; i < output_samples; i++) {
+                    pcm_data[i] = raw_pcm_data[i * ratio];
+                }
+                ESP_LOGI(TAG, "Downsampled %d samples to %d samples (%dHz -> %dHz, step=%.2f)", raw_pcm_data.size(), pcm_data.size(), actual_sample_rate, target_sample_rate, ratio);
             } else {
-                // 采样率相同，直接使用原始数据
+                // 比例接近1，直接使用原始数据
                 pcm_data = std::move(raw_pcm_data);
-                ESP_LOGI(TAG, "Got %d PCM samples from M4A decoder at 44.1kHz (no resampling)", pcm_data.size());
+                ESP_LOGI(TAG, "Got %d PCM samples from M4A decoder at %dHz (ratio≈1, no resampling)", 
+                         pcm_data.size(), actual_sample_rate);
             }
         } else {
             ESP_LOGI(TAG, "Invalid sample count: %d, skipping this chunk", sample_count);

@@ -938,6 +938,21 @@ std::vector<int16_t> AudioService::DecodeWavChunk(const std::vector<uint8_t>& wa
 void AudioService::M4aPcmDataTask() {
     ESP_LOGI(TAG, "M4A PCM data task started");
     
+    // 计算音频播放的时间间隔
+    // 假设输出采样率是44.1kHz，每个样本16位，2通道
+    const int output_sample_rate = 44100;
+    const int channels = 2;
+    const int bytes_per_sample = 2; // 16位 = 2字节
+    const int bytes_per_frame = channels * bytes_per_sample; // 2通道 * 2字节 = 4字节/帧
+    
+    // 计算每次读取4096字节对应的播放时间（毫秒）
+    const int buffer_size = 4096;
+    const int samples_per_read = buffer_size / bytes_per_frame; // 4096 / 4 = 1024样本
+    const int playback_time_ms = (samples_per_read * 1000) / output_sample_rate; // 1024 * 1000 / 44100 ≈ 23ms
+    
+    ESP_LOGI(TAG, "M4A data timing: %d bytes = %d samples = %d ms playback time", 
+             buffer_size, samples_per_read, playback_time_ms);
+    
     while (music_playing_) {
         if (m4a_decoder_) {
             // 检查队列状态，如果队列太满就暂停数据生产
@@ -951,27 +966,30 @@ void AudioService::M4aPcmDataTask() {
             
             // 从M4A解码器获取PCM数据
             std::vector<int16_t> pcm_data = m4a_decoder_->GetPcmData();
-                if (!pcm_data.empty()) {
+            if (!pcm_data.empty()) {
                 // 推送到统一的音频播放队列
-                        {
-                            std::lock_guard<std::mutex> lock(audio_playback_mutex_);
-                            if (audio_playback_queue_.size() < 1000) {  // 大幅增加队列大小到1000
-                                audio_playback_queue_.push_back(std::move(pcm_data));
-                                ESP_LOGD(TAG, "Added M4A PCM data to queue, queue size: %zu", 
-                                        audio_playback_queue_.size());
-                            } else {
-                                    // 队列满了，跳过一些数据以减少丢包
-                                    static int skip_count = 0;
-                                    skip_count++;
-                                    if (skip_count % 10 == 0) {  // 每10次丢包才记录一次日志，减少日志输出
-                                        ESP_LOGW(TAG, "Audio playback queue full, dropping M4A PCM data (dropped %d times)", skip_count);
-                                    }
-                            }
+                {
+                    std::lock_guard<std::mutex> lock(audio_playback_mutex_);
+                    if (audio_playback_queue_.size() < 1000) {  // 大幅增加队列大小到1000
+                        audio_playback_queue_.push_back(std::move(pcm_data));
+                        ESP_LOGD(TAG, "Added M4A PCM data to queue, queue size: %zu", 
+                                audio_playback_queue_.size());
+                    } else {
+                        // 队列满了，跳过一些数据以减少丢包
+                        static int skip_count = 0;
+                        skip_count++;
+                        if (skip_count % 10 == 0) {  // 每10次丢包才记录一次日志，减少日志输出
+                            ESP_LOGW(TAG, "Audio playback queue full, dropping M4A PCM data (dropped %d times)", skip_count);
                         }
-                        audio_playback_cv_.notify_all();  // 通知音频输出任务处理新数据
                     }
+                }
+                audio_playback_cv_.notify_all();  // 通知音频输出任务处理新数据
+            }
         }
-        // 移除延迟，最大化数据生产速度
+        
+        // 根据音频播放时间调整读取频率，确保播放速度正确
+        // 如果读取的数据对应23ms的播放时间，那么应该等待约23ms再读取下一批
+        vTaskDelay(pdMS_TO_TICKS(playback_time_ms));
     }
     
     ESP_LOGI(TAG, "M4A PCM data task ended");
