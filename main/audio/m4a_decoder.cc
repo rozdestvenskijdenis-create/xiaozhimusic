@@ -286,23 +286,40 @@ std::vector<int16_t> M4aDecoder::GetPcmData() {
                     ESP_LOGW(TAG, "Failed to get AAC decoder info, using defaults");
                 }
             }
-            const int target_sample_rate = 24000; // 音频的实际输出速度，由系统决定
+            
+            // 转换为单声道（使用左声道）
+            std::vector<int16_t> mono_pcm_data;
+            if (actual_channels == 2) {
+                // 立体声转单声道，取左声道
+                int mono_samples = raw_pcm_data.size() / 2;
+                mono_pcm_data.resize(mono_samples);
+                for (int i = 0; i < mono_samples; i++) {
+                    mono_pcm_data[i] = raw_pcm_data[i * 2]; // 取左声道
+                }
+                ESP_LOGI(TAG, "Converted stereo to mono: %d samples -> %d samples", raw_pcm_data.size(), mono_pcm_data.size());
+            } else {
+                // 已经是单声道，直接使用
+                mono_pcm_data = std::move(raw_pcm_data);
+                ESP_LOGI(TAG, "Already mono: %d samples", mono_pcm_data.size());
+            }
+            
+            const int target_sample_rate = 22050; // 音频的实际输出速度，由系统决定
             
             if (actual_sample_rate != target_sample_rate) {
-                // 计算重采样比例
-                float ratio = (float)actual_sample_rate * actual_channels / target_sample_rate;
+                // 计算重采样比例（单声道）
+                float ratio = (float)actual_sample_rate / target_sample_rate;
         
-                int output_samples = raw_pcm_data.size() / ratio;
+                int output_samples = mono_pcm_data.size() / ratio;
                 pcm_data.resize(output_samples);
                 //进行样本缩小，提高播放速度
                 for (int i = 0; i < output_samples; i++) {
-                    pcm_data[i] = raw_pcm_data[i * ratio];
+                    pcm_data[i] = mono_pcm_data[i * ratio];
                 }
-                ESP_LOGI(TAG, "Downsampled %d samples to %d samples (%dHz -> %dHz, step=%.2f)", raw_pcm_data.size(), pcm_data.size(), actual_sample_rate, target_sample_rate, ratio);
+                ESP_LOGI(TAG, "Downsampled %d mono samples to %d samples (%dHz -> %dHz, step=%.2f)", mono_pcm_data.size(), pcm_data.size(), actual_sample_rate, target_sample_rate, ratio);
             } else {
-                // 比例接近1，直接使用原始数据
-                pcm_data = std::move(raw_pcm_data);
-                ESP_LOGI(TAG, "Got %d PCM samples from M4A decoder at %dHz (ratio≈1, no resampling)", 
+                // 比例接近1，直接使用单声道数据
+                pcm_data = std::move(mono_pcm_data);
+                ESP_LOGI(TAG, "Got %d mono PCM samples from M4A decoder at %dHz (ratio≈1, no resampling)", 
                          pcm_data.size(), actual_sample_rate);
             }
         } else {

@@ -215,7 +215,7 @@ void McpServer::AddCommonTools() {
             auto& audio_service = Application::GetInstance().GetAudioService();
             
             // 测试搜索并播放音乐
-            std::string test_url = "http://ws.stream.qqmusic.qq.com/C2000024jrso28p8VA.m4a?fromtag=2&guid=api.vkeys.cn&trace=423fe07fdd5c2b9e&uin=3232283746&vkey=0F85BB4558671DC8205E5B90C22952E9D6071D28806844373DB3C0C77549170DE1012206B4CBBB809F9831CAC93EF3DA2662515519D6DB2F__v2b9ab4ce";
+            std::string test_url = "http://ws.stream.qqmusic.qq.com/http://aqqmusic.tc.qq.com/C2000024jrso28p8VA.m4a?guid=api.vkeys.cn&vkey=024352D7AC95C4B77148099AE70256A3BED4F60B8EC59EB3925F1F4B3A81340723E8DD5A79E2D63A8BE6C22533C282CE222C20E53823B3D0__v2b94c614&uin=3232283746&fromtag=123021";
             ESP_LOGI(TAG, "Testing music playback with M4A URL");
             audio_service.PlayMusicFromUrl(test_url);
             
