@@ -796,7 +796,11 @@ void AudioService::PlayMusicFromUrl(const std::string& url) {
         music_playing_ = true;
         ESP_LOGI(TAG, "Started ESP-ADF pipeline M4A playback from: %s", url.c_str());
         
-                            // 启动一个任务来定期获取PCM数据并推送到播放队列
+        // 确保在音乐播放时保持唤醒词检测，允许语音中断
+        ESP_LOGI(TAG, "Enabling wake word detection for music interruption");
+        // EnableVoiceProcessing(false);  // 禁用语音处理，避免与音乐冲突
+        // EnableWakeWordDetection(true); // 启用唤醒词检测，允许中断音乐
+        // 启动一个任务来定期获取PCM数据并推送到播放队列
                     xTaskCreate([](void* arg) {
                         AudioService* audio_service = (AudioService*)arg;
                         audio_service->M4aPcmDataTask();
@@ -833,6 +837,11 @@ void AudioService::StopMusic() {
         m4a_decoder_.reset();
         ESP_LOGI(TAG, "M4A decoder cleaned up");
     }
+    
+    // 音乐停止后恢复正常的语音处理状态
+    ESP_LOGI(TAG, "Music stopped, restoring normal voice processing");
+    // EnableVoiceProcessing(true);  // 恢复语音处理功能
+    // EnableWakeWordDetection(true); // 保持唤醒词检测
     
     ESP_LOGI(TAG, "Music stopped");
 }
@@ -1125,12 +1134,14 @@ void AudioService::M4aPcmDataTask() {
         // 根据队列状态动态调整延迟
         {
             std::lock_guard<std::mutex> lock(audio_playback_mutex_);
-            if (audio_playback_queue_.size() > 1000) {
-                vTaskDelay(pdMS_TO_TICKS(20)); // 队列较满时增加延迟
+            if (audio_playback_queue_.size() > 1500) {
+                vTaskDelay(pdMS_TO_TICKS(100)); // 队列很满时大幅增加延迟
+            } else if (audio_playback_queue_.size() > 1000) {
+                vTaskDelay(pdMS_TO_TICKS(50));  // 队列较满时增加延迟
             } else if (audio_playback_queue_.size() > 500) {
-                vTaskDelay(pdMS_TO_TICKS(10)); // 队列中等时中等延迟
+                vTaskDelay(pdMS_TO_TICKS(20));  // 队列中等时中等延迟
             } else {
-                vTaskDelay(pdMS_TO_TICKS(5));  // 队列较空时最小延迟
+                vTaskDelay(pdMS_TO_TICKS(10));  // 队列较空时最小延迟
             }
         }
     }

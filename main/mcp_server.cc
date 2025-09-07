@@ -215,7 +215,10 @@ void McpServer::AddCommonTools() {
             auto& audio_service = Application::GetInstance().GetAudioService();
             
             // 测试搜索并播放音乐
-            std::string test_url = "http://ws.stream.qqmusic.qq.com/http://aqqmusic.tc.qq.com/C2000024jrso28p8VA.m4a?guid=api.vkeys.cn&vkey=024352D7AC95C4B77148099AE70256A3BED4F60B8EC59EB3925F1F4B3A81340723E8DD5A79E2D63A8BE6C22533C282CE222C20E53823B3D0__v2b94c614&uin=3232283746&fromtag=123021";
+            // 夜曲
+            // std::string test_url = "http://ws.stream.qqmusic.qq.com/http://aqqmusic.tc.qq.com/C2000024jrso28p8VA.m4a?guid=api.vkeys.cn&vkey=024352D7AC95C4B77148099AE70256A3BED4F60B8EC59EB3925F1F4B3A81340723E8DD5A79E2D63A8BE6C22533C282CE222C20E53823B3D0__v2b94c614&uin=3232283746&fromtag=123021";
+            // 七里香
+            std::string test_url = "http://ws.stream.qqmusic.qq.com/C2000012Ez0a1tFcOI.m4a?fromtag=2&guid=api.vkeys.cn&src=C200004Z8Ihr0JIu5s.m4a&trace=14dc03c25a750586&uin=3232283746&vkey=3D77991CECACC16268523598AD596667CD64F57F2B60CEECA42432AC337EA53751C40F8EFDE68514E7B4988B3EF97981FE1636BF33603DB9__v2b9abc19";
             ESP_LOGI(TAG, "Testing music playback with M4A URL");
             audio_service.PlayMusicFromUrl(test_url);
             
