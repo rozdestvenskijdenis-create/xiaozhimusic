@@ -840,8 +840,8 @@ void AudioService::StopMusic() {
     
     // 音乐停止后恢复正常的语音处理状态
     ESP_LOGI(TAG, "Music stopped, restoring normal voice processing");
-    // EnableVoiceProcessing(true);  // 恢复语音处理功能
-    // EnableWakeWordDetection(true); // 保持唤醒词检测
+    EnableVoiceProcessing(true);  // 恢复语音处理功能
+    EnableWakeWordDetection(true); // 保持唤醒词检测
     
     ESP_LOGI(TAG, "Music stopped");
 }

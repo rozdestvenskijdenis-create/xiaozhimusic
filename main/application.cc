@@ -254,6 +254,14 @@ void Application::ToggleChatState() {
         SetDeviceState(kDeviceStateWifiConfiguring);
         return;
     }
+    
+    // 如果正在播放音乐，停止音乐并进入待命状态
+    if (audio_service_.IsMusicPlaying()) {
+        ESP_LOGI(TAG, "Music is playing, stopping music and entering idle state");
+        audio_service_.StopMusic();
+        SetDeviceState(kDeviceStateIdle);
+        return;
+    }
 
     if (!protocol_) {
         ESP_LOGE(TAG, "Protocol not initialized");
