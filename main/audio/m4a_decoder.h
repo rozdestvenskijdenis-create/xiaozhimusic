@@ -29,6 +29,9 @@ public:
     
     // 设置重采样器
     void SetResampler(int input_sample_rate, int output_sample_rate);
+    
+    // 获取解码器元素句柄
+    audio_element_handle_t GetDecoderElement() const { return m4a_decoder_; }
 
 private:
     bool initialized_;

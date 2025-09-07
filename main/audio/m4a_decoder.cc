@@ -145,7 +145,9 @@ bool M4aDecoder::PlayUrl(const std::string& url) {
     ESP_LOGI(TAG, "M4A playback started successfully (without I2S output)");
     ESP_LOGI(TAG, "Note: PCM data will be available through DecodeChunk method");
     // 等待更长时间让M4A解码器完全启动并开始处理数据
-    vTaskDelay(pdMS_TO_TICKS(5000));
+    vTaskDelay(pdMS_TO_TICKS(1000));
+    
+    ESP_LOGI(TAG, "M4A decoder pipeline started, ready for data processing");
     
     // 暂时禁用重采样器，直接使用M4A的原始采样率
     ESP_LOGI(TAG, "Skipping resampler setup for now, using M4A original sample rate");
@@ -260,6 +262,8 @@ std::vector<int16_t> M4aDecoder::GetPcmData() {
     // 从我们创建的输出缓冲区读取PCM数据，控制数据量
     char output_buffer[4096];  // 增加缓冲区大小，提高数据流
     int bytes_read = rb_read(output_ringbuf_, output_buffer, sizeof(output_buffer), 0); // 非阻塞读取
+    ESP_LOGD(TAG, "rb_read returned: %d bytes", bytes_read);
+    
     if (bytes_read > 0) {
         // 将字节数据转换为int16_t PCM数据
         int16_t* pcm_samples = reinterpret_cast<int16_t*>(output_buffer);
@@ -270,61 +274,14 @@ std::vector<int16_t> M4aDecoder::GetPcmData() {
             std::vector<int16_t> raw_pcm_data(sample_count);
             std::memcpy(raw_pcm_data.data(), pcm_samples, bytes_read);
             
-            // 获取AAC解码器的实际输出采样率
-            int actual_sample_rate = 44100;  // 默认值
-            int actual_channels = 2;         // 默认值
-            
-            // 尝试从AAC解码器获取实际的采样率信息
-            if (m4a_decoder_) {
-                // 从AAC解码器获取音频信息
-                audio_element_info_t info;
-                if (audio_element_getinfo(m4a_decoder_, &info) == ESP_OK) {
-                    actual_sample_rate = info.sample_rates;
-                    actual_channels = info.channels;
-                    ESP_LOGI(TAG, "AAC decoder actual output: %d Hz, %d channels", actual_sample_rate, actual_channels);
-                } else {
-                    ESP_LOGW(TAG, "Failed to get AAC decoder info, using defaults");
-                }
-            }
-            
-            // 转换为单声道（使用左声道）
-            std::vector<int16_t> mono_pcm_data;
-            if (actual_channels == 2) {
-                // 立体声转单声道，取左声道
-                int mono_samples = raw_pcm_data.size() / 2;
-                mono_pcm_data.resize(mono_samples);
-                for (int i = 0; i < mono_samples; i++) {
-                    mono_pcm_data[i] = raw_pcm_data[i * 2]; // 取左声道
-                }
-                ESP_LOGI(TAG, "Converted stereo to mono: %d samples -> %d samples", raw_pcm_data.size(), mono_pcm_data.size());
-            } else {
-                // 已经是单声道，直接使用
-                mono_pcm_data = std::move(raw_pcm_data);
-                ESP_LOGI(TAG, "Already mono: %d samples", mono_pcm_data.size());
-            }
-            
-            const int target_sample_rate = 22050; // 音频的实际输出速度，由系统决定
-            
-            if (actual_sample_rate != target_sample_rate) {
-                // 计算重采样比例（单声道）
-                float ratio = (float)actual_sample_rate / target_sample_rate;
-        
-                int output_samples = mono_pcm_data.size() / ratio;
-                pcm_data.resize(output_samples);
-                //进行样本缩小，提高播放速度
-                for (int i = 0; i < output_samples; i++) {
-                    pcm_data[i] = mono_pcm_data[i * ratio];
-                }
-                ESP_LOGI(TAG, "Downsampled %d mono samples to %d samples (%dHz -> %dHz, step=%.2f)", mono_pcm_data.size(), pcm_data.size(), actual_sample_rate, target_sample_rate, ratio);
-            } else {
-                // 比例接近1，直接使用单声道数据
-                pcm_data = std::move(mono_pcm_data);
-                ESP_LOGI(TAG, "Got %d mono PCM samples from M4A decoder at %dHz (ratio≈1, no resampling)", 
-                         pcm_data.size(), actual_sample_rate);
-            }
+            // 直接返回原始PCM数据，重采样由缓冲区管理任务处理
+            pcm_data = std::move(raw_pcm_data);
+            ESP_LOGD(TAG, "Got %d raw PCM samples from M4A decoder", pcm_data.size());
         } else {
             ESP_LOGI(TAG, "Invalid sample count: %d, skipping this chunk", sample_count);
         }
+    } else if (bytes_read < 0) {
+        ESP_LOGW(TAG, "rb_read error: %d (ring buffer may be empty or decoder not running)", bytes_read);
     }
     
     return pcm_data;

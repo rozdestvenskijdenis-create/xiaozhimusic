@@ -140,11 +140,21 @@ private:
     std::deque<std::vector<int16_t>> audio_playback_queue_;
     std::mutex audio_playback_mutex_;
     std::condition_variable audio_playback_cv_;
+    
+    // 多线程音频处理队列
+    std::deque<std::vector<uint8_t>> raw_audio_queue_;  // 原始音频数据队列
+    std::mutex raw_audio_mutex_;
+    std::condition_variable raw_audio_cv_;
+    std::deque<std::vector<int16_t>> processed_pcm_queue_;  // 处理后的PCM队列
+    std::mutex processed_pcm_mutex_;
+    std::condition_variable processed_pcm_cv_;
     // For server AEC
     std::deque<uint32_t> timestamp_queue_;
     // 音乐播放相关
     std::string current_music_url_;
     TaskHandle_t music_task_handle_ = nullptr;
+    TaskHandle_t audio_decoder_task_handle_ = nullptr;  // 音频解码任务
+    TaskHandle_t audio_buffer_mgr_task_handle_ = nullptr;  // 缓冲区管理任务
     
     // M4A解码器
     std::unique_ptr<M4aDecoder> m4a_decoder_;
@@ -175,6 +185,10 @@ private:
     void M4aPcmDataTask(); // 从M4A解码器获取PCM数据的任务
     std::vector<int16_t> DecodeM4aChunk(const std::vector<uint8_t>& m4a_data);
     std::vector<int16_t> DecodeWavChunk(const std::vector<uint8_t>& wav_data);
+    
+    // 多线程音频处理任务
+    void AudioDecoderTask();  // 音频解码生产者任务
+    void AudioBufferManagerTask();  // 缓冲区管理任务
 };
 
 #endif
