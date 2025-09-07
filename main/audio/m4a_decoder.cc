@@ -281,7 +281,7 @@ std::vector<int16_t> M4aDecoder::GetPcmData() {
             ESP_LOGI(TAG, "Invalid sample count: %d, skipping this chunk", sample_count);
         }
     } else if (bytes_read < 0) {
-        ESP_LOGW(TAG, "rb_read error: %d (ring buffer may be empty or decoder not running)", bytes_read);
+        // ESP_LOGW(TAG, "rb_read error: %d (ring buffer may be empty or decoder not running)", bytes_read);
     }
     
     return pcm_data;

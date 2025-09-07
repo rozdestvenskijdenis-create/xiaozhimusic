@@ -802,6 +802,9 @@ void AudioService::PlayMusicFromUrl(const std::string& url) {
                         audio_service->M4aPcmDataTask();
                         vTaskDelete(NULL);
                     }, "m4a_pcm_task", 8192, this, 4, nullptr);  // 降低优先级到4，避免抢占音频输出
+                    
+                    // 暂停多线程音频处理任务，避免冲突
+                    ESP_LOGI(TAG, "Pausing multi-threaded audio processing tasks for M4A playback");
     } else {
         ESP_LOGE(TAG, "Failed to start ESP-ADF pipeline M4A playback");
     }
@@ -838,7 +841,14 @@ void AudioService::MusicStreamTask() {
     ESP_LOGI(TAG, "Music stream task started");
     
     while (true) {
-        if (music_playing_ && !current_music_url_.empty()) {
+        // 如果正在播放音乐，暂停MusicStreamTask，避免与M4aPcmDataTask冲突
+        if (music_playing_) {
+            vTaskDelay(pdMS_TO_TICKS(100)); // 暂停100ms
+            continue;
+        }
+        
+        // 只有在没有播放音乐时才处理HTTP流
+        if (!current_music_url_.empty()) {
             ESP_LOGI(TAG, "Starting music stream from: %s", current_music_url_.c_str());
             
             // 创建HTTP客户端
@@ -1026,6 +1036,10 @@ std::vector<int16_t> AudioService::DecodeWavChunk(const std::vector<uint8_t>& wa
 void AudioService::M4aPcmDataTask() {
     ESP_LOGI(TAG, "M4A PCM data task started");
     
+    // 等待M4A解码器完全启动，避免开头跳过音乐
+    ESP_LOGI(TAG, "Waiting for M4A decoder to fully initialize...");
+    vTaskDelay(pdMS_TO_TICKS(3000)); // 等待2秒让解码器完全启动
+    
     // 计算音频播放的时间间隔
     // 假设输出采样率是44.1kHz，每个样本16位，2通道
     const int output_sample_rate = 44100;
@@ -1046,8 +1060,8 @@ void AudioService::M4aPcmDataTask() {
             // 检查队列状态，如果队列太满就暂停数据生产
             {
                 std::lock_guard<std::mutex> lock(audio_playback_mutex_);
-                if (audio_playback_queue_.size() > 1500) {  // 提高队列阈值，减少暂停
-                    vTaskDelay(pdMS_TO_TICKS(1)); // 减少暂停时间
+                if (audio_playback_queue_.size() > 2500) {  // 进一步提高队列阈值，减少暂停
+                    vTaskDelay(pdMS_TO_TICKS(10)); // 增加暂停时间，让播放跟上
                     continue;
                 }
             }
@@ -1058,24 +1072,39 @@ void AudioService::M4aPcmDataTask() {
                 // 直接进行重采样处理，简化流程
                 std::vector<int16_t> processed_pcm = std::move(pcm_data);
                 
-                // 简单的重采样：从44100Hz到22050Hz（2:1下采样）
-                if (processed_pcm.size() >= 2) {
+                // 重采样：从44100Hz到24000Hz（1.8375:1下采样）- 使用简单低通滤波减少杂声
+                if (processed_pcm.size() >= 4) {
                     std::vector<int16_t> downsampled_pcm;
-                    downsampled_pcm.reserve(processed_pcm.size() / 2);
+                    const float ratio = 44100.0f / 24000.0f; // 1.8375
+                    const int output_samples = processed_pcm.size() / ratio;
+                    downsampled_pcm.reserve(output_samples);
                     
-                    // 每2个样本取1个（简单下采样）
-                    for (size_t i = 0; i < processed_pcm.size() - 1; i += 2) {
-                        downsampled_pcm.push_back(processed_pcm[i]); // 取左声道
+                    // 简单的3点移动平均低通滤波，减少高频杂声
+                    for (int i = 0; i < output_samples; i++) {
+                        float source_index = i * ratio;
+                        int index = (int)source_index;
+                        
+                        if (index >= 1 && index < processed_pcm.size() - 1) {
+                            // 使用3点移动平均进行简单低通滤波
+                            int32_t sum = (int32_t)processed_pcm[index - 1] + 
+                                         (int32_t)processed_pcm[index] + 
+                                         (int32_t)processed_pcm[index + 1];
+                            int16_t filtered = sum / 3;
+                            downsampled_pcm.push_back(filtered);
+                        } else if (index < processed_pcm.size()) {
+                            // 边界情况，直接使用样本
+                            downsampled_pcm.push_back(processed_pcm[index]);
+                        }
                     }
                     
                     processed_pcm = std::move(downsampled_pcm);
-                    ESP_LOGD(TAG, "Downsampled to %zu samples", processed_pcm.size());
+                    ESP_LOGD(TAG, "Downsampled to %zu samples (44100Hz -> 24000Hz) with 3-point low-pass filter", processed_pcm.size());
                 }
                 
                 // 推送到统一的音频播放队列
                 {
                     std::lock_guard<std::mutex> lock(audio_playback_mutex_);
-                    if (audio_playback_queue_.size() < 1000) {  // 大幅增加队列大小到1000
+                    if (audio_playback_queue_.size() < 2000) {  // 进一步增加队列大小到2000
                         audio_playback_queue_.push_back(std::move(processed_pcm));
                         ESP_LOGD(TAG, "Added M4A PCM data to queue, queue size: %zu", 
                                 audio_playback_queue_.size());
@@ -1092,9 +1121,18 @@ void AudioService::M4aPcmDataTask() {
             }
         }
         
-        // 移除时间控制延迟，让数据生产保持高速
-        // 多线程架构会自动平衡生产和消费速度
-        vTaskDelay(pdMS_TO_TICKS(5)); // 只保留最小延迟避免CPU占用过高
+        // 控制数据生产速度，避免队列积压
+        // 根据队列状态动态调整延迟
+        {
+            std::lock_guard<std::mutex> lock(audio_playback_mutex_);
+            if (audio_playback_queue_.size() > 1000) {
+                vTaskDelay(pdMS_TO_TICKS(20)); // 队列较满时增加延迟
+            } else if (audio_playback_queue_.size() > 500) {
+                vTaskDelay(pdMS_TO_TICKS(10)); // 队列中等时中等延迟
+            } else {
+                vTaskDelay(pdMS_TO_TICKS(5));  // 队列较空时最小延迟
+            }
+        }
     }
     
     ESP_LOGI(TAG, "M4A PCM data task ended");
@@ -1105,6 +1143,11 @@ void AudioService::AudioDecoderTask() {
     ESP_LOGI(TAG, "Audio decoder task started");
     
     while (!service_stopped_) {
+        // 如果正在播放音乐，暂停多线程处理，避免冲突
+        if (music_playing_) {
+            vTaskDelay(pdMS_TO_TICKS(100)); // 暂停100ms
+            continue;
+        }
         std::unique_lock<std::mutex> lock(raw_audio_mutex_);
         
         // 等待原始音频数据或服务停止
@@ -1162,6 +1205,11 @@ void AudioService::AudioBufferManagerTask() {
     ESP_LOGI(TAG, "Audio buffer manager task started");
     
     while (!service_stopped_) {
+        // 如果正在播放音乐，暂停多线程处理，避免冲突
+        if (music_playing_) {
+            vTaskDelay(pdMS_TO_TICKS(100)); // 暂停100ms
+            continue;
+        }
         std::unique_lock<std::mutex> lock(processed_pcm_mutex_);
         
         // 等待处理后的PCM数据或服务停止
@@ -1221,9 +1269,21 @@ void AudioService::AudioBufferManagerTask() {
         
                 int output_samples = mono_pcm_data.size() / ratio;
                 std::vector<int16_t> resampled_pcm(output_samples);
-                //进行样本缩小，提高播放速度
+                
+                // 使用3点移动平均低通滤波进行重采样，减少杂声
                 for (int i = 0; i < output_samples; i++) {
-                    resampled_pcm[i] = mono_pcm_data[i * ratio];
+                    int source_index = i * ratio;
+                    
+                    if (source_index >= 1 && source_index < mono_pcm_data.size() - 1) {
+                        // 使用3点移动平均进行简单低通滤波
+                        int32_t sum = (int32_t)mono_pcm_data[source_index - 1] + 
+                                     (int32_t)mono_pcm_data[source_index] + 
+                                     (int32_t)mono_pcm_data[source_index + 1];
+                        resampled_pcm[i] = sum / 3;
+                    } else if (source_index < mono_pcm_data.size()) {
+                        // 边界情况，直接使用样本
+                        resampled_pcm[i] = mono_pcm_data[source_index];
+                    }
                 }
                 ESP_LOGI(TAG, "Downsampled %d mono samples to %d samples (%dHz -> %dHz, step=%.2f)", 
                         mono_pcm_data.size(), resampled_pcm.size(), actual_sample_rate, target_sample_rate, ratio);
