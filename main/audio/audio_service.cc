@@ -276,6 +276,30 @@ void AudioService::AudioInputTask() {
             continue;
         }
 
+        // 如果正在播放音乐，只处理唤醒词检测，跳过其他音频输入处理
+        if (music_playing_) {
+            // 只处理唤醒词检测，允许用户中断音乐
+            if (bits & AS_EVENT_WAKE_WORD_RUNNING) {
+                std::vector<int16_t> data;
+                int samples = wake_word_->GetFeedSize();
+                if (samples > 0) {
+                    if (ReadAudioData(data, 16000, samples)) {
+                        wake_word_->Feed(data);
+                        continue;
+                    }
+                }
+            }
+            // 跳过其他音频处理，避免音乐被当作麦克风输入
+            // 静态变量用于减少日志输出频率
+            static int skip_count = 0;
+            skip_count++;
+            if (skip_count % 10 == 0) {  // 每1000次跳过记录一次日志
+                ESP_LOGD(TAG, "Music playing: skipping audio input processing (skipped %d times)", skip_count);
+            }
+            vTaskDelay(pdMS_TO_TICKS(10));
+            continue;
+        }
+
         /* Used for audio testing in NetworkConfiguring mode by clicking the BOOT button */
         if (bits & AS_EVENT_AUDIO_TESTING_RUNNING) {
             if (audio_testing_queue_.size() >= AUDIO_TESTING_MAX_DURATION_MS / OPUS_FRAME_DURATION_MS) {
@@ -815,10 +839,8 @@ void AudioService::PlayMusicFromUrl(const std::string& url) {
         music_playing_ = true;
         ESP_LOGI(TAG, "Started ESP-ADF pipeline M4A playback from: %s", url.c_str());
         
-        // 确保在音乐播放时保持唤醒词检测，允许语音中断
-        ESP_LOGI(TAG, "Enabling wake word detection for music interruption");
-        // EnableVoiceProcessing(false);  // 禁用语音处理，避免与音乐冲突
-        // EnableWakeWordDetection(true); // 启用唤醒词检测，允许中断音乐
+        // 设置音乐播放模式，禁用语音处理避免回声
+        SetMusicMode(true);
         // 启动一个任务来定期获取PCM数据并推送到播放队列
                     xTaskCreate([](void* arg) {
                         AudioService* audio_service = (AudioService*)arg;
@@ -857,12 +879,22 @@ void AudioService::StopMusic() {
         ESP_LOGI(TAG, "M4A decoder cleaned up");
     }
     
-    // 音乐停止后恢复正常的语音处理状态
-    ESP_LOGI(TAG, "Music stopped, restoring normal voice processing");
-    EnableVoiceProcessing(true);  // 恢复语音处理功能
-    EnableWakeWordDetection(true); // 保持唤醒词检测
+    // 退出音乐播放模式，恢复正常的语音处理状态
+    SetMusicMode(false);
     
     ESP_LOGI(TAG, "Music stopped");
+}
+
+void AudioService::SetMusicMode(bool enabled) {
+    if (enabled) {
+        ESP_LOGI(TAG, "Setting music mode: disabling voice processing to prevent echo");
+        EnableVoiceProcessing(false);  // 禁用语音处理
+        EnableWakeWordDetection(true); // 保持唤醒词检测，允许中断
+    } else {
+        ESP_LOGI(TAG, "Exiting music mode: restoring normal voice processing");
+        EnableVoiceProcessing(true);   // 恢复语音处理
+        EnableWakeWordDetection(true); // 保持唤醒词检测
+    }
 }
 
 void AudioService::MusicStreamTask() {

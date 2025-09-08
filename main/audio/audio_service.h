@@ -111,6 +111,7 @@ public:
     void PlayMusicFromUrl(const std::string& url);
     void StopMusic();
     bool IsMusicPlaying() const { return music_playing_; }
+    void SetMusicMode(bool enabled);  // 设置音乐播放模式，控制音频输入处理
 private:
     AudioCodec* codec_ = nullptr;
     AudioServiceCallbacks callbacks_;
