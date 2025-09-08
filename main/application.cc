@@ -707,6 +707,13 @@ void Application::SetDeviceState(DeviceState state) {
                 protocol_->SendStartListening(listening_mode_);
                 audio_service_.EnableVoiceProcessing(true);
                 audio_service_.EnableWakeWordDetection(false);
+            } else {
+                // 即使音频处理器在运行，也要确保它完全准备好
+                // 这解决了音乐播放结束后第一次进入聆听状态的问题
+                ESP_LOGI(TAG, "Audio processor is running, ensuring it's ready for listening");
+                // 发送开始聆听命令
+                protocol_->SendStartListening(listening_mode_);
+                audio_service_.EnableWakeWordDetection(false);
             }
             break;
         case kDeviceStateSpeaking:

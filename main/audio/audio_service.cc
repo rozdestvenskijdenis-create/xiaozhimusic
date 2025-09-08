@@ -1,6 +1,8 @@
 #include "audio_service.h"
 #include <esp_log.h>
 #include <cstring>
+#include "device_state.h"
+#include "application.h"
 
 #if CONFIG_USE_AUDIO_PROCESSOR
 #include "processors/afe_audio_processor.h"
@@ -882,7 +884,20 @@ void AudioService::StopMusic() {
     // 退出音乐播放模式，恢复正常的语音处理状态
     SetMusicMode(false);
     
-    ESP_LOGI(TAG, "Music stopped");
+    // 给语音处理一些时间来完全恢复，然后恢复设备状态到idle
+    // 使用Schedule来延迟执行，避免阻塞当前任务
+    Application::GetInstance().Schedule([this]() {
+        // 等待语音处理完全恢复（包括预热时间）
+        vTaskDelay(pdMS_TO_TICKS(200)); // 给足够的时间让语音处理完全恢复
+        
+        // 确保音频输入预热标志被清除
+        audio_input_need_warmup_ = false;
+        
+        Application::GetInstance().SetDeviceState(kDeviceStateIdle);
+        ESP_LOGI(TAG, "Music stopped and device state restored to idle after voice processing recovery");
+    });
+    
+    ESP_LOGI(TAG, "Music stopped, voice processing recovery scheduled");
 }
 
 void AudioService::SetMusicMode(bool enabled) {
