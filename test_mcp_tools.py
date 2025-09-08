@@ -52,7 +52,7 @@ def main():
     test_tool_call("test_music_playback")
     
     # 测试4: 调用音乐搜索工具
-    test_tool_call("search_music", {
+    test_tool_call("test_search_music", {
         "keyword": "小星星"
     })
     

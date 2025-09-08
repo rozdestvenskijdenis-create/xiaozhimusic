@@ -477,12 +477,14 @@ void Application::Start() {
                 McpServer::GetInstance().ParseMessage(payload);
             }
         } else if (strcmp(type->valuestring, "music_search") == 0) {
-            // 直接处理音乐搜索请求
+            // 通过MCP工具处理音乐搜索请求
             auto keyword = cJSON_GetObjectItem(root, "keyword");
             if (cJSON_IsString(keyword)) {
                 ESP_LOGI(TAG, "Received music search request for: %s", keyword->valuestring);
                 Schedule([this, keyword_str = std::string(keyword->valuestring)]() {
-                    SearchAndPlayMusic(keyword_str);
+                    // 创建MCP工具调用消息
+                    std::string mcp_message = "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"test_search_music\",\"arguments\":{\"keyword\":\"" + keyword_str + "\"}}}";
+                    McpServer::GetInstance().ParseMessage(mcp_message);
                 });
             }
         } else if (strcmp(type->valuestring, "system") == 0) {
