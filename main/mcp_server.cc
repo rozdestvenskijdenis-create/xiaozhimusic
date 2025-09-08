@@ -15,6 +15,8 @@
 #include "display.h"
 #include "board.h"
 #include "audio_service.h"
+#include "device_state.h"
+#include "protocols/protocol.h"
 #include <cJSON.h>
 #define TAG "MCP"
 
@@ -164,6 +166,9 @@ void McpServer::AddCommonTools() {
                                 auto& audio_service = Application::GetInstance().GetAudioService();
                                 audio_service.PlayMusicFromUrl(music_url);
                                 
+                                // 设置设备状态为listening，保持音乐播放时的静默状态
+                                Application::GetInstance().SetDeviceState(kDeviceStateListening);
+                                
                                 std::string result = "{\"success\": true, \"song\": \"";
                                 if (cJSON_IsString(song)) {
                                     result += song->valuestring;
@@ -222,6 +227,9 @@ void McpServer::AddCommonTools() {
             std::string test_url = "http://ws.stream.qqmusic.qq.com/C200003Yn1vu1BzjDo.m4a?fromtag=2&guid=api.vkeys.cn&trace=54aa84b86fa4bfca&uin=3232283746&vkey=E83BAB20ACFCC54E68AADCC266EE5D604396A483FCFA8EB99E3930917E475A6C09FF7E9456184433054A54EBB5CDDE7E1421B269FF2A348E__v2b9aaff4";//鸡你太美
             ESP_LOGI(TAG, "Testing music playback with M4A URL");
             audio_service.PlayMusicFromUrl(test_url);
+            
+            // 设置设备状态为listening，保持音乐播放时的静默状态
+            Application::GetInstance().SetDeviceState(kDeviceStateListening);
             
             return "{\"success\": true, \"message\": \"开始播放测试音乐\"}";
         });

@@ -433,6 +433,11 @@ void Application::Start() {
             if (strcmp(state->valuestring, "start") == 0) {
                 Schedule([this]() {
                     aborted_ = false;
+                    // 如果正在播放音乐，保持listening状态，不切换到speaking
+                    if (audio_service_.IsMusicPlaying()) {
+                        ESP_LOGI(TAG, "Music is playing, keeping listening state instead of switching to speaking");
+                        return;
+                    }
                     if (device_state_ == kDeviceStateIdle || device_state_ == kDeviceStateListening) {
                         SetDeviceState(kDeviceStateSpeaking);
                     }
@@ -804,83 +809,4 @@ void Application::SetAecMode(AecMode mode) {
 
 void Application::PlaySound(const std::string_view& sound) {
     audio_service_.PlaySound(sound);
-}
-
-void Application::SearchAndPlayMusic(const std::string& keyword) {
-    ESP_LOGI(TAG, "Searching for music: %s", keyword.c_str());
-    
-    // 构建搜索URL（使用URL编码）
-    std::string encoded_keyword = url_encode(keyword);
-    std::string search_url = "https://api.vkeys.cn/v2/music/tencent?word=" + encoded_keyword + "&choose=1&quality=4";
-    ESP_LOGI(TAG, "Search URL: %s", search_url.c_str());
-    
-    // 创建HTTP客户端搜索音乐
-    auto& board = Board::GetInstance();
-    auto network = board.GetNetwork();
-    auto http = network->CreateHttp(0);
-    
-    ESP_LOGI(TAG, "Opening HTTP connection...");
-    if (http->Open("GET", search_url)) {
-        ESP_LOGI(TAG, "HTTP connection opened successfully");
-        std::string response = http->ReadAll();
-        http->Close();
-        ESP_LOGI(TAG, "HTTP response received, length: %zu", response.length());
-        ESP_LOGI(TAG, "HTTP response: %s", response.c_str());
-        
-        // 解析JSON响应
-        cJSON* root = cJSON_Parse(response.c_str());
-        if (root) {
-            ESP_LOGI(TAG, "JSON parsed successfully");
-            cJSON* code = cJSON_GetObjectItem(root, "code");
-            if (cJSON_IsNumber(code) && code->valueint == 200) {
-                ESP_LOGI(TAG, "API returned success code: %d", code->valueint);
-                cJSON* data = cJSON_GetObjectItem(root, "data");
-                if (cJSON_IsObject(data)) {
-                    ESP_LOGI(TAG, "Data object found");
-                    cJSON* song = cJSON_GetObjectItem(data, "song");
-                    cJSON* singer = cJSON_GetObjectItem(data, "singer");
-                    cJSON* url = cJSON_GetObjectItem(data, "url");
-                    
-                    if (cJSON_IsString(url)) {
-                        std::string music_url = url->valuestring;
-                        ESP_LOGI(TAG, "Music URL found: %s", music_url.c_str());
-                        
-                        // 开始播放音乐
-                        ESP_LOGI(TAG, "Calling PlayMusicFromUrl...");
-                        audio_service_.PlayMusicFromUrl(music_url);
-                        
-                        // 显示播放信息
-                        auto display = board.GetDisplay();
-                        std::string song_name = cJSON_IsString(song) ? song->valuestring : "未知歌曲";
-                        std::string artist_name = cJSON_IsString(singer) ? singer->valuestring : "未知歌手";
-                        std::string message = "正在播放: " + song_name + " - " + artist_name;
-                        display->ShowNotification(message.c_str());
-                        
-                        ESP_LOGI(TAG, "Music search and play completed successfully");
-                    } else {
-                        ESP_LOGE(TAG, "URL field not found or not a string");
-                        auto display = board.GetDisplay();
-                        display->ShowNotification("未找到音乐播放链接");
-                    }
-                } else {
-                    ESP_LOGE(TAG, "Data object not found");
-                    auto display = board.GetDisplay();
-                    display->ShowNotification("音乐数据解析失败");
-                }
-            } else {
-                ESP_LOGE(TAG, "API returned error code: %d", code ? code->valueint : -1);
-                auto display = board.GetDisplay();
-                display->ShowNotification("音乐搜索失败");
-            }
-            cJSON_Delete(root);
-        } else {
-            ESP_LOGE(TAG, "Failed to parse JSON response");
-            auto display = board.GetDisplay();
-            display->ShowNotification("音乐搜索响应解析失败");
-        }
-    } else {
-        ESP_LOGE(TAG, "Failed to open HTTP connection");
-        auto display = board.GetDisplay();
-        display->ShowNotification("网络连接失败");
-    }
 }
