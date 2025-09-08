@@ -1,6 +1,8 @@
 #include "audio_service.h"
 #include <esp_log.h>
 #include <cstring>
+#include "device_state.h"
+#include "application.h"
 
 #if CONFIG_USE_AUDIO_PROCESSOR
 #include "processors/afe_audio_processor.h"
@@ -882,7 +884,10 @@ void AudioService::StopMusic() {
     // 退出音乐播放模式，恢复正常的语音处理状态
     SetMusicMode(false);
     
-    ESP_LOGI(TAG, "Music stopped");
+    // 音乐播放结束后，恢复设备状态到idle
+    Application::GetInstance().SetDeviceState(kDeviceStateIdle);
+    
+    ESP_LOGI(TAG, "Music stopped and device state restored to idle");
 }
 
 void AudioService::SetMusicMode(bool enabled) {
