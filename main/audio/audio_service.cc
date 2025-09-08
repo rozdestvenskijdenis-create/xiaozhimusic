@@ -431,6 +431,8 @@ void AudioService::OpusCodecTask() {
                     }
                 }
                 audio_playback_cv_.notify_all();
+                
+                // 丢包检测状态已移除
             } else {
                 ESP_LOGE(TAG, "Failed to decode audio");
                 lock.lock();
@@ -514,13 +516,27 @@ void AudioService::PushTaskToEncodeQueue(AudioTaskType type, std::vector<int16_t
 
 bool AudioService::PushPacketToDecodeQueue(std::unique_ptr<AudioStreamPacket> packet, bool wait) {
     std::unique_lock<std::mutex> lock(audio_queue_mutex_);
+    
+    // 如果队列满了，根据策略处理
     if (audio_decode_queue_.size() >= MAX_DECODE_PACKETS_IN_QUEUE) {
         if (wait) {
+            // 等待队列有空间
             audio_queue_cv_.wait(lock, [this]() { return audio_decode_queue_.size() < MAX_DECODE_PACKETS_IN_QUEUE; });
         } else {
-            return false;
+            // 不等待时，如果队列接近满，丢弃最旧的数据包为新数据让路
+            if (audio_decode_queue_.size() >= MAX_DECODE_PACKETS_IN_QUEUE * 0.9) {
+                static int drop_count = 0;
+                drop_count++;
+                if (drop_count % 10 == 0) {  // 每10次丢包记录一次日志
+                    ESP_LOGW(TAG, "Audio decode queue full, dropping old packets (dropped %d times)", drop_count);
+                }
+                audio_decode_queue_.pop_front();  // 丢弃最旧的数据包
+            } else {
+                return false;  // 队列太满，拒绝新数据包
+            }
         }
     }
+    
     audio_decode_queue_.push_back(std::move(packet));
     audio_queue_cv_.notify_all();
     return true;
@@ -728,6 +744,9 @@ void AudioService::ResetDecoder() {
     timestamp_queue_.clear();
     audio_decode_queue_.clear();
     audio_testing_queue_.clear();
+    
+    // 重置丢包检测状态（已移除相关变量）
+    
     audio_queue_cv_.notify_all();
     
     // 清理统一的音频播放队列

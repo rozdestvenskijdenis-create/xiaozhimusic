@@ -202,12 +202,24 @@ bool MqttProtocol::OpenAudioChannel() {
         }
         uint32_t timestamp = ntohl(*(uint32_t*)&data[8]);
         uint32_t sequence = ntohl(*(uint32_t*)&data[12]);
+        
+        // 处理序列号不匹配的情况
         if (sequence < remote_sequence_) {
             ESP_LOGW(TAG, "Received audio packet with old sequence: %lu, expected: %lu", sequence, remote_sequence_);
             return;
         }
+        
+        // 检测丢包并记录统计信息
         if (sequence != remote_sequence_ + 1) {
-            ESP_LOGW(TAG, "Received audio packet with wrong sequence: %lu, expected: %lu", sequence, remote_sequence_ + 1);
+            uint32_t lost_packets = sequence - (remote_sequence_ + 1);
+            ESP_LOGW(TAG, "Audio packet loss detected: received seq=%lu, expected=%lu, lost=%lu packets", 
+                    sequence, remote_sequence_ + 1, lost_packets);
+            
+            // 如果丢包太多，重置序列号以避免长期不同步
+            if (lost_packets > 10) {
+                ESP_LOGW(TAG, "Too many lost packets (%lu), resetting sequence", lost_packets);
+                remote_sequence_ = sequence - 1; // 设置为当前包的前一个
+            }
         }
 
         size_t decrypted_size = data.size() - aes_nonce_.size();
