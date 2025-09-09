@@ -884,20 +884,10 @@ void AudioService::StopMusic() {
     // 退出音乐播放模式，恢复正常的语音处理状态
     SetMusicMode(false);
     
-    // 给语音处理一些时间来完全恢复，然后恢复设备状态到idle
-    // 使用Schedule来延迟执行，避免阻塞当前任务
-    Application::GetInstance().Schedule([this]() {
-        // 等待语音处理完全恢复（包括预热时间）
-        vTaskDelay(pdMS_TO_TICKS(200)); // 给足够的时间让语音处理完全恢复
-        
-        // 确保音频输入预热标志被清除
-        audio_input_need_warmup_ = false;
-        
-        Application::GetInstance().SetDeviceState(kDeviceStateIdle);
-        ESP_LOGI(TAG, "Music stopped and device state restored to idle after voice processing recovery");
-    });
+    // 音乐播放结束后，恢复设备状态到idle
+    Application::GetInstance().SetDeviceState(kDeviceStateIdle);
     
-    ESP_LOGI(TAG, "Music stopped, voice processing recovery scheduled");
+    ESP_LOGI(TAG, "Music stopped and device state restored to idle");
 }
 
 void AudioService::SetMusicMode(bool enabled) {

@@ -37,6 +37,30 @@ static std::string url_encode(const std::string& str) {
     return result;
 }
 
+// 提取歌曲名称的关键词处理函数
+static std::string extract_song_keyword(const std::string& input) {
+    std::string result = input;
+    
+    // 检查是否存在《》
+    if(input.find("《") != std::string::npos && input.find("》") != std::string::npos) {
+        // 存在书名号，提取里面的内容
+        size_t left_bookmark = input.find("《");
+        size_t right_bookmark = input.find("》");
+        if (left_bookmark != std::string::npos && right_bookmark != std::string::npos && right_bookmark > left_bookmark) {
+            result = input.substr(left_bookmark + 1, right_bookmark - left_bookmark - 1);
+        }
+    }
+    // 不存在书名号，保持原样不变
+    // 移除首尾空格
+    while (!result.empty() && result[0] == ' ') {
+        result.erase(0, 1);
+    }
+    while (!result.empty() && result.back() == ' ') {
+        result.pop_back();
+    }   
+    ESP_LOGI(TAG, "Original keyword: '%s' -> Extracted: '%s'", input.c_str(), result.c_str());
+    return result;
+}
 McpServer::McpServer() {
 }
 
@@ -130,10 +154,14 @@ void McpServer::AddCommonTools() {
         }),
         [](const PropertyList& properties) -> ReturnValue {
             auto keyword = properties["keyword"].value<std::string>();
-            ESP_LOGI(TAG, "Searching for music: %s", keyword.c_str());
+            ESP_LOGI(TAG, "Original search keyword: %s", keyword.c_str());
+            
+            // 提取歌曲名称关键词
+            std::string extracted_keyword = extract_song_keyword(keyword);
+            ESP_LOGI(TAG, "Searching for music with extracted keyword: %s", extracted_keyword.c_str());
             
             // 构建搜索URL（使用URL编码）
-            std::string encoded_keyword = url_encode(keyword);
+            std::string encoded_keyword = url_encode(extracted_keyword);
             std::string search_url = "https://api.vkeys.cn/v2/music/tencent?word=" + encoded_keyword + "&choose=1&quality=2";
             
             // 创建HTTP客户端搜索音乐
